@@ -100,7 +100,7 @@ GET /api/v1/queues/{endpointId}/depth
 ## 2. Duplicates — "we got the same event twice"
 
 Replacement service behavior: **at-least-once delivery with a stable
-idempotency key.** The customer needs to dedupe on `X-Webhook-Event-Id`.
+idempotency key.** The customer needs to dedupe on `X-Billing-Event-Id`.
 Receiver-side dedupe is the contract published in `design.md`.
 
 ### 2a. Confirm both deliveries belonged to the same event
@@ -115,15 +115,15 @@ If the attempt history shows `attempt 1: outcome=CRASH` and
 `attempt 2: outcome=SUCCESS`, the duplicate is by design: a worker
 crashed mid-send, we re-dispatched. The receiver saw both HTTP requests.
 The contract was honored — both requests carried the same
-`X-Webhook-Event-Id` header.
+`X-Billing-Event-Id` header.
 
 Reply to the customer with:
 
 - the event_id
 - the two attempt timestamps
 - "this was a crash-recovery re-delivery. Our service guarantees
-  at-least-once delivery; receivers must dedupe on `X-Webhook-Event-Id`.
-  Both requests carried `X-Webhook-Event-Id: {eventId}` — please confirm
+  at-least-once delivery; receivers must dedupe on `X-Billing-Event-Id`.
+  Both requests carried `X-Billing-Event-Id: {eventId}` — please confirm
   you're checking for duplicates on that header."
 
 ### 2b. If they DID see two different `event_id`s

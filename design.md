@@ -8,7 +8,7 @@ A single bounded context, *Webhook Delivery*, with three aggregates
 scheduler polls the outbox for due deliveries, claims them per-endpoint
 under a lease, and fires HTTP requests through Java's async `HttpClient`
 so one slow endpoint cannot block another (the S4 gate). Each request
-carries an `X-Webhook-Event-Id` header that gives receivers a stable
+carries an `X-Billing-Event-Id` header that gives receivers a stable
 idempotency key — that header is the S6 contract. Transient failures
 retry on an exponential-backoff-with-jitter schedule; permanent failures
 and exhausted retries terminate to a dead-letter state that is queryable
@@ -175,12 +175,12 @@ DB's unique constraint makes exactly one win; the loser converts its
 exception into a read of the survivor and returns that. This passes S5
 even under concurrency (covered by `IdempotentResubmitTest`).
 
-### Receiver-side: `X-Webhook-Event-Id` header
+### Receiver-side: `X-Billing-Event-Id` header
 
 Every outbound POST carries:
 
 ```
-X-Webhook-Event-Id:         <event_id>
+X-Billing-Event-Id:         <event_id>
 X-Webhook-Event-Type:       <event_type>
 X-Webhook-Delivery-Attempt: <n>
 ```
@@ -188,11 +188,11 @@ X-Webhook-Delivery-Attempt: <n>
 **The contract published to subscribers (would live in customer-facing
 docs):**
 
-> Each webhook delivery carries an `X-Webhook-Event-Id` HTTP header. This
+> Each webhook delivery carries an `X-Billing-Event-Id` HTTP header. This
 > value is stable across retries and recovery from worker crashes — if
 > the same `event_id` arrives twice, those are the same logical event
 > and must be deduplicated on your side. Your endpoint MUST be idempotent
-> on `X-Webhook-Event-Id`.
+> on `X-Billing-Event-Id`.
 
 This is the direct fix for Initech's ticket (#4845, failure mode #3).
 Without this header, a receiver has no way to distinguish a fresh
@@ -271,7 +271,7 @@ Three properties, each load-bearing:
 3. **Receiver header.** The crash recovery just described re-dispatches
    with the same `event_id`. The receiver may have processed the first
    attempt (the network already happened). They use the
-   `X-Webhook-Event-Id` header to dedupe on their side.
+   `X-Billing-Event-Id` header to dedupe on their side.
 
 **Why this is stronger than the legacy supervisor.** The legacy
 supervisor only fires on a *detected* crash (process exit, segfault).

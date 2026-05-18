@@ -339,7 +339,7 @@ For traceability with `design.md`:
 |---|---|---|
 | 1 | No retry on 5xx | `RetryPolicy` with exponential backoff + jitter; outcome classification |
 | 2 | Single queue, single worker | Per-endpoint claim + async I/O dispatch (S4) |
-| 3 | Crash → silent duplicate | Stable `X-Webhook-Event-Id` header contract (S6) |
+| 3 | Crash → silent duplicate | Stable `X-Billing-Event-Id` header contract (S6) |
 | 4 | Orphan in-flight | DB-backed leases + `RecoveryService` periodic sweep |
 | 5 | `non_2xx` lumps everything | `AttemptOutcome` enum + status-class routing |
 | 6 | Non-durable queue | All state in DB; `submit()` is the durable boundary |
