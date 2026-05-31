@@ -89,9 +89,15 @@ public interface DeliveryRepository extends JpaRepository<Delivery, String> {
     /** S7: queue depth for an endpoint = pending deliveries for that endpoint. */
     long countByEndpointIdAndStatus(String endpointId, DeliveryStatus status);
 
-    /** S9: dead-letter listing since a timestamp. */
+    /**
+     * S9: dead-letter listing since a timestamp. The attempt history is fetch-joined
+     * (via {@code @EntityGraph}) so the {@code DeliveryView} mapping in the controller
+     * doesn't trigger a lazy load per row — one query instead of N+1. {@code distinct}
+     * collapses the row duplication the collection join would otherwise produce.
+     */
+    @EntityGraph(attributePaths = {"attempts"})
     @Query("""
-            select d from Delivery d
+            select distinct d from Delivery d
             where d.status = com.zenskar.billing.domain.DeliveryStatus.DEAD_LETTERED
               and d.deadLetteredAt >= :since
             order by d.deadLetteredAt asc

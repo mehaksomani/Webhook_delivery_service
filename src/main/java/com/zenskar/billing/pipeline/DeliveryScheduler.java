@@ -15,7 +15,7 @@ import org.springframework.stereotype.Component;
 import com.zenskar.billing.domain.Delivery;
 import com.zenskar.billing.repository.DeliveryRepository;
 import com.zenskar.billing.config.BillingProperties;
-import com.zenskar.billing.http.BillingHttpClient;
+import com.zenskar.billing.http.WebhookClient;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -44,7 +44,7 @@ public class DeliveryScheduler {
 
     private final DeliveryRepository deliveryRepository;
     private final DispatchService dispatchService;
-    private final BillingHttpClient httpClient;
+    private final WebhookClient httpClient;
     private final BillingProperties props;
     private final Clock clock;
 

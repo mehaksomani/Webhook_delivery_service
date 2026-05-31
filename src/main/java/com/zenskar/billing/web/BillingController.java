@@ -21,7 +21,7 @@ import com.zenskar.billing.service.QueryService;
 import com.zenskar.billing.service.RegisterEndpointCommand;
 import com.zenskar.billing.service.SubmitEventCommand;
 import com.zenskar.billing.service.SubmitService;
-import com.zenskar.billing.web.ApiExceptions.EndpointNotFoundException;
+import com.zenskar.billing.web.ApiExceptions.DeliveryNotFoundException;
 import com.zenskar.billing.web.dto.DeliveryView;
 import com.zenskar.billing.web.dto.RegisterEndpointRequest;
 import com.zenskar.billing.web.dto.SubmitEventRequest;
@@ -112,6 +112,6 @@ public class BillingController {
         return queryService.findDelivery(eventId)
                 .map(DeliveryView::of)
                 .map(ResponseEntity::ok)
-                .orElseThrow(() -> new EndpointNotFoundException("delivery not found: " + eventId));
+                .orElseThrow(() -> new DeliveryNotFoundException("delivery not found: " + eventId));
     }
 }

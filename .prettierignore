@@ -1,0 +1,51 @@
+# Build output
+target/
+build/
+out/
+bin/
+
+# Maven / Gradle
+.mvn/
+mvnw
+mvnw.cmd
+gradlew
+gradlew.cmd
+gradle/
+.gradle/
+
+# Java source (formatted by Spotless/Checkstyle/google-java-format, not Prettier)
+*.java
+*.class
+*.jar
+*.war
+
+# Compiled / generated
+**/generated/
+**/generated-sources/
+
+# Dependencies
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Logs & temp
+logs/
+*.log
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Misc
+*.min.js
+*.min.css
+coverage/

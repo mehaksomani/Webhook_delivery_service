@@ -2,7 +2,7 @@
 
 ## One-paragraph summary
 
-A single bounded context, *Webhook Delivery*, with three aggregates
+A single bounded context, _Webhook Delivery_, with three aggregates
 (`Delivery`, `DeliveryAttempt`, `Endpoint`) backed by a relational outbox.
 `submit(event)` is a durable database write that returns immediately. A
 scheduler polls the outbox for due deliveries, claims them per-endpoint
@@ -103,7 +103,7 @@ updated = 1), the other gets zero and moves on.
 
 **Why per-endpoint:** the legacy service had one global queue and one
 worker. A single slow request from one endpoint stalled deliveries for
-*every* endpoint (failure mode #2 in `diagnosis.md`). By iterating
+_every_ endpoint (failure mode #2 in `diagnosis.md`). By iterating
 endpoints at the top of the loop, every endpoint gets fair access on
 every tick. The per-endpoint in-flight cap then prevents one endpoint
 from monopolizing the I/O thread pool.
@@ -140,13 +140,13 @@ second is just noise.
 
 **Outcome classification** (in `AttemptOutcome.fromStatus`):
 
-| HTTP outcome | Classification | Retry behavior |
-|---|---|---|
-| 2xx | SUCCESS | terminal — SUCCEEDED |
-| 408, 429 | RETRIABLE_FAILURE | retry on schedule |
-| Other 4xx | PERMANENT_FAILURE | immediate DEAD_LETTERED, retry budget untouched |
-| 5xx | RETRIABLE_FAILURE | retry on schedule |
-| timeout, connect/IO error | RETRIABLE_FAILURE | retry on schedule |
+| HTTP outcome              | Classification    | Retry behavior                                  |
+| ------------------------- | ----------------- | ----------------------------------------------- |
+| 2xx                       | SUCCESS           | terminal — SUCCEEDED                            |
+| 408, 429                  | RETRIABLE_FAILURE | retry on schedule                               |
+| Other 4xx                 | PERMANENT_FAILURE | immediate DEAD_LETTERED, retry budget untouched |
+| 5xx                       | RETRIABLE_FAILURE | retry on schedule                               |
+| timeout, connect/IO error | RETRIABLE_FAILURE | retry on schedule                               |
 
 The "permanent 4xx goes straight to DLQ" path is the direct fix for
 failure mode #5 in `diagnosis.md`: a malformed payload never succeeds, so
@@ -266,7 +266,7 @@ Three properties, each load-bearing:
    `X-Billing-Event-Id` header to dedupe on their side.
 
 **Why this is stronger than the legacy supervisor.** The legacy
-supervisor only fires on a *detected* crash (process exit, segfault).
+supervisor only fires on a _detected_ crash (process exit, segfault).
 Failure mode #4 in `diagnosis.md` shows three events that hung silently
 with no crash signal — those slip through the legacy recovery. The lease
 mechanism is timestamp-based: a hung worker's lease expires just like a
@@ -277,13 +277,13 @@ crashed worker's lease expires.
 Per the spec, the function-level interface is `query(...)`. I model that
 as a small Java service interface, exposed externally via REST:
 
-| Spec | Java | REST |
-|---|---|---|
-| `submit(event)` | `SubmitService.submit(SubmitEventCommand)` | `POST /api/v1/events` |
-| `query("queue_depth", endpoint_id)` | `QueryService.queueDepth(String)` | `GET /api/v1/queues/{endpointId}/depth` |
-| `query("endpoint_status", endpoint_id)` | `QueryService.endpointStatus(String)` | `GET /api/v1/endpoints/{endpointId}/status` |
-| `query("dead_letters", since=...)` | `QueryService.deadLettersSince(Instant)` | `GET /api/v1/dead-letters?since=…` |
-| (runbook helper, not in spec) | `QueryService.findDelivery(String)` | `GET /api/v1/deliveries/{eventId}` |
+| Spec                                    | Java                                       | REST                                        |
+| --------------------------------------- | ------------------------------------------ | ------------------------------------------- |
+| `submit(event)`                         | `SubmitService.submit(SubmitEventCommand)` | `POST /api/v1/events`                       |
+| `query("queue_depth", endpoint_id)`     | `QueryService.queueDepth(String)`          | `GET /api/v1/queues/{endpointId}/depth`     |
+| `query("endpoint_status", endpoint_id)` | `QueryService.endpointStatus(String)`      | `GET /api/v1/endpoints/{endpointId}/status` |
+| `query("dead_letters", since=...)`      | `QueryService.deadLettersSince(Instant)`   | `GET /api/v1/dead-letters?since=…`          |
+| (runbook helper, not in spec)           | `QueryService.findDelivery(String)`        | `GET /api/v1/deliveries/{eventId}`          |
 
 Endpoint registration (`POST /api/v1/endpoints`) is also exposed; the
 spec is silent on this but tests need it.
@@ -348,8 +348,8 @@ spec is silent on this but tests need it.
   worked example in customer docs. Two-hour follow-up, not redesign — and
   lower priority than the SSRF guard above and inbound auth.
 
-- **No unhealthy-endpoint scheduling skip in v1.** Health *tracking* is in;
-  health-based *throttling* is one if-statement at the top of
+- **No unhealthy-endpoint scheduling skip in v1.** Health _tracking_ is in;
+  health-based _throttling_ is one if-statement at the top of
   `dispatchEndpoint`. Left out to keep test timing deterministic; called
   out explicitly in design.
 

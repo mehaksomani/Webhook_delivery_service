@@ -7,7 +7,6 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import com.zenskar.billing.web.ApiExceptions.EndpointNotFoundException;
-import com.zenskar.billing.web.ApiExceptions.InvalidSubmissionException;
 import com.zenskar.billing.domain.Delivery;
 import com.zenskar.billing.repository.DeliveryRepository;
 import com.zenskar.billing.repository.EndpointRepository;
@@ -29,7 +28,9 @@ public class SubmitService {
 
     @Transactional
     public Delivery submit(SubmitEventCommand cmd) {
-        validate(cmd);
+        // Inbound validation is enforced two ways already: @Valid on the request DTO
+        // (user-facing 400s) and the Delivery.submit factory (domain invariants). No
+        // third copy here.
 
         // Idempotent: existing event_id -> no-op, return existing record.
         var existing = deliveryRepository.findByEventId(cmd.eventId());
@@ -57,17 +58,5 @@ public class SubmitService {
             return deliveryRepository.findByEventId(cmd.eventId())
                     .orElseThrow(() -> new IllegalStateException("race resolution failed: " + cmd.eventId()));
         }
-    }
-
-    private void validate(SubmitEventCommand cmd) {
-        if (cmd == null) throw new InvalidSubmissionException("command required");
-        if (isBlank(cmd.eventId())) throw new InvalidSubmissionException("event_id required");
-        if (isBlank(cmd.eventType())) throw new InvalidSubmissionException("event_type required");
-        if (isBlank(cmd.endpointId())) throw new InvalidSubmissionException("endpoint_id required");
-        if (cmd.payload() == null) throw new InvalidSubmissionException("payload required");
-    }
-
-    private static boolean isBlank(String s) {
-        return s == null || s.isBlank();
     }
 }

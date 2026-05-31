@@ -1,9 +1,11 @@
 package com.zenskar.billing.domain;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 
 import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
@@ -24,26 +26,24 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 
 /**
- * The aggregate root for delivering a single billing event to a single endpoint.
+ * The aggregate root for delivering a single billing event to a single
+ * endpoint.
  * <p>
- * Identity is the caller-supplied {@code eventId} — this is what makes {@code submit()}
- * idempotent (S5) and what receivers dedupe on (S6). One row per event_id; no exceptions.
+ * Identity is the caller-supplied {@code eventId} — this is what makes
+ * {@code submit()}
+ * idempotent (S5) and what receivers dedupe on (S6). One row per event_id; no
+ * exceptions.
  * <p>
- * State transitions are exposed as named methods rather than setters so the lifecycle
+ * State transitions are exposed as named methods rather than setters so the
+ * lifecycle
  * (PENDING → IN_FLIGHT → SUCCEEDED | DEAD_LETTERED) is documented in code.
  */
 @Entity
-@Table(
-        name = "deliveries",
-        indexes = {
-                @Index(name = "ix_deliveries_pending_by_endpoint",
-                       columnList = "endpoint_id,status,next_attempt_at"),
-                @Index(name = "ix_deliveries_lease",
-                       columnList = "status,lease_expires_at"),
-                @Index(name = "ix_deliveries_dlq",
-                       columnList = "status,dead_lettered_at")
-        }
-)
+@Table(name = "deliveries", indexes = {
+        @Index(name = "ix_deliveries_pending_by_endpoint", columnList = "endpoint_id,status,next_attempt_at"),
+        @Index(name = "ix_deliveries_lease", columnList = "status,lease_expires_at"),
+        @Index(name = "ix_deliveries_dlq", columnList = "status,dead_lettered_at")
+})
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class Delivery {
@@ -110,24 +110,19 @@ public class Delivery {
     }
 
     public static Delivery submit(String eventId, String endpointId, String eventType, String payload, Instant now) {
-        if (eventId == null || eventId.isBlank()) throw new IllegalArgumentException("eventId required");
-        if (endpointId == null || endpointId.isBlank()) throw new IllegalArgumentException("endpointId required");
-        if (eventType == null || eventType.isBlank()) throw new IllegalArgumentException("eventType required");
-        if (payload == null) throw new IllegalArgumentException("payload required");
+        if (eventId == null || eventId.isBlank())
+            throw new IllegalArgumentException("eventId required");
+        if (endpointId == null || endpointId.isBlank())
+            throw new IllegalArgumentException("endpointId required");
+        if (eventType == null || eventType.isBlank())
+            throw new IllegalArgumentException("eventType required");
+        if (payload == null)
+            throw new IllegalArgumentException("payload required");
         return new Delivery(eventId, endpointId, eventType, payload, now);
     }
 
     public List<DeliveryAttempt> getAttempts() {
         return Collections.unmodifiableList(attempts);
-    }
-
-    public void markInFlight(String leaseHolder, Instant leaseExpiresAt) {
-        if (status != DeliveryStatus.PENDING) {
-            throw new IllegalStateException("cannot mark in-flight from status=" + status);
-        }
-        this.status = DeliveryStatus.IN_FLIGHT;
-        this.leaseHolder = leaseHolder;
-        this.leaseExpiresAt = leaseExpiresAt;
     }
 
     public DeliveryAttempt startAttempt(Instant startedAt) {
@@ -141,7 +136,82 @@ public class Delivery {
         return attempt;
     }
 
-    public void succeed(Instant succeededAt) {
+    /**
+     * What happened to the delivery's lifecycle when an attempt result was applied.
+     * Returned by {@link #recordAttemptResult} so the caller can emit the matching
+     * events/logs without re-deriving the decision. {@code IGNORED_*} values mean a
+     * late or out-of-order async result was discarded and no state changed.
+     */
+    public enum Transition {
+        SUCCEEDED,
+        RETRY_SCHEDULED,
+        DEAD_LETTERED,
+        IGNORED_DUPLICATE,
+        IGNORED_NOT_IN_FLIGHT
+    }
+
+    /**
+     * Records the outcome of attempt {@code attemptNo} and advances the lifecycle:
+     * success terminates, a permanent failure or exhausted retry budget dead-letters,
+     * and a retriable failure schedules the next attempt per {@code retryPolicy}.
+     * <p>
+     * Late async completions are absorbed here rather than in the caller: if the
+     * attempt was already recorded, or the delivery is no longer IN_FLIGHT (the
+     * recovery sweep re-pended it), nothing changes and an {@code IGNORED_*}
+     * transition is returned.
+     */
+    public Transition recordAttemptResult(int attemptNo, AttemptOutcome outcome, Integer statusCode,
+            Long latencyMs, String error, RetryPolicy retryPolicy, Instant now) {
+        DeliveryAttempt attempt = attempts.stream()
+                .filter(a -> a.getAttemptNo() == attemptNo)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException(
+                        "attempt missing: event_id=" + eventId + " attempt_no=" + attemptNo));
+
+        if (attempt.getOutcome() != null) return Transition.IGNORED_DUPLICATE;
+        if (status != DeliveryStatus.IN_FLIGHT) return Transition.IGNORED_NOT_IN_FLIGHT;
+
+        attempt.record(outcome, statusCode, latencyMs, error, now);
+
+        if (outcome == AttemptOutcome.SUCCESS) {
+            succeed(now);
+            return Transition.SUCCEEDED;
+        }
+        if (outcome == AttemptOutcome.PERMANENT_FAILURE) {
+            String detail = statusCode != null ? "status=" + statusCode : error;
+            deadLetter("permanent_failure (" + detail + ")", now);
+            return Transition.DEAD_LETTERED;
+        }
+        Optional<Duration> nextDelay = retryPolicy.nextDelay(attemptNo);
+        if (nextDelay.isEmpty()) {
+            deadLetter("max_attempts_exceeded (" + retryPolicy.maxAttempts() + ")", now);
+            return Transition.DEAD_LETTERED;
+        }
+        scheduleRetry(now.plus(nextDelay.get()));
+        return Transition.RETRY_SCHEDULED;
+    }
+
+    /**
+     * Used by the recovery service when a stale lease is reclaimed. Marks the
+     * in-progress attempt (if any) as a CRASH so the attempt history is honest,
+     * re-pends the delivery, and returns the crashed attempt number for logging.
+     */
+    public int markCrashed(String note, Instant now) {
+        DeliveryAttempt inFlight = attempts.stream()
+                .filter(a -> a.getOutcome() == null)
+                .reduce((first, second) -> second)
+                .orElse(null);
+        int crashedAttemptNo = inFlight != null ? inFlight.getAttemptNo() : attemptCount;
+        if (inFlight != null) {
+            inFlight.record(AttemptOutcome.CRASH, null, 0L, note, now);
+        }
+        releaseLease(now);
+        return crashedAttemptNo;
+    }
+
+    // ---- internal lifecycle transitions (driven by the methods above) ----
+
+    private void succeed(Instant succeededAt) {
         this.status = DeliveryStatus.SUCCEEDED;
         this.succeededAt = succeededAt;
         this.leaseHolder = null;
@@ -149,14 +219,14 @@ public class Delivery {
     }
 
     /** Stay in PENDING but schedule the next try. Used after a retriable failure. */
-    public void scheduleRetry(Instant nextAttemptAt) {
+    private void scheduleRetry(Instant nextAttemptAt) {
         this.status = DeliveryStatus.PENDING;
         this.nextAttemptAt = nextAttemptAt;
         this.leaseHolder = null;
         this.leaseExpiresAt = null;
     }
 
-    public void deadLetter(String reason, Instant when) {
+    private void deadLetter(String reason, Instant when) {
         this.status = DeliveryStatus.DEAD_LETTERED;
         this.deadLetterReason = reason;
         this.deadLetteredAt = when;
@@ -164,9 +234,9 @@ public class Delivery {
         this.leaseExpiresAt = null;
     }
 
-    /** Used by the recovery service when a stale lease is reclaimed. */
-    public void releaseLease(Instant nextAttemptAt) {
-        if (status != DeliveryStatus.IN_FLIGHT) return;
+    private void releaseLease(Instant nextAttemptAt) {
+        if (status != DeliveryStatus.IN_FLIGHT)
+            return;
         this.status = DeliveryStatus.PENDING;
         this.leaseHolder = null;
         this.leaseExpiresAt = null;

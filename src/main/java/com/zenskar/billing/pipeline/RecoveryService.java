@@ -13,7 +13,6 @@ import org.springframework.stereotype.Service;
 import com.zenskar.billing.events.DeliveryFailedEvent;
 import com.zenskar.billing.domain.AttemptOutcome;
 import com.zenskar.billing.domain.Delivery;
-import com.zenskar.billing.domain.DeliveryAttempt;
 import com.zenskar.billing.repository.DeliveryRepository;
 import com.zenskar.billing.observability.DeliveryEventLog;
 
@@ -25,6 +24,8 @@ import lombok.extern.slf4j.Slf4j;
 @RequiredArgsConstructor
 @Slf4j
 public class RecoveryService {
+
+    private static final String CRASH_NOTE = "worker_crashed_or_hung";
 
     private final DeliveryRepository deliveryRepository;
     private final ApplicationEventPublisher events;
@@ -67,19 +68,12 @@ public class RecoveryService {
 
         int recovered = 0;
         for (Delivery d : stale) {
-            // Mark the in-progress attempt as CRASH so the attempt history is honest.
-            DeliveryAttempt inFlight = d.getAttempts().stream()
-                    .filter(a -> a.getOutcome() == null)
-                    .reduce((first, second) -> second)
-                    .orElse(null);
-            if (inFlight != null) {
-                inFlight.record(AttemptOutcome.CRASH, null, 0L, "worker_crashed_or_hung", now);
-            }
-            int crashedAttemptNo = inFlight != null ? inFlight.getAttemptNo() : d.getAttemptCount();
-            d.releaseLease(now);
+            // The aggregate marks its in-progress attempt as CRASH and re-pends itself,
+            // so the attempt history stays honest without us touching its internals.
+            int crashedAttemptNo = d.markCrashed(CRASH_NOTE, now);
             deliveryRepository.save(d);
             recovered++;
-            eventLog.workerCrashed(d.getEventId(), d.getEndpointId(), crashedAttemptNo, "worker_crashed_or_hung");
+            eventLog.workerCrashed(d.getEventId(), d.getEndpointId(), crashedAttemptNo, CRASH_NOTE);
             log.warn("Recovered stale lease event_id={} attempts={} note=re-dispatched_after_lease_expiry",
                     d.getEventId(), d.getAttemptCount());
 

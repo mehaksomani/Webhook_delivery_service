@@ -14,12 +14,12 @@ import com.zenskar.billing.security.UrlPolicy;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * JDK {@link HttpClient}-backed implementation. Uses {@code sendAsync} so each
- * attempt is non-blocking; multiple in-flight attempts to different endpoints
- * share the same I/O loop. Built and wired by {@code HttpClientConfig}.
+ * JDK {@link HttpClient}-backed {@link WebhookClient}. Uses {@code sendAsync} so
+ * each attempt is non-blocking; multiple in-flight attempts to different endpoints
+ * share the same I/O loop. Built and wired by {@code BillingConfig}.
  */
 @Slf4j
-public class BillingHttpClient {
+public class BillingHttpClient implements WebhookClient {
 
     private final HttpClient httpClient;
     private final Duration requestTimeout;
@@ -31,6 +31,7 @@ public class BillingHttpClient {
         this.urlPolicy = urlPolicy;
     }
 
+    @Override
     public CompletableFuture<HttpDeliveryResult> deliver(
             String url,
             String eventId,

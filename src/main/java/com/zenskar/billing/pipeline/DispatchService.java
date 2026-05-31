@@ -1,7 +1,6 @@
 package com.zenskar.billing.pipeline;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -14,7 +13,6 @@ import com.zenskar.billing.events.DeliverySucceededEvent;
 import com.zenskar.billing.domain.AttemptOutcome;
 import com.zenskar.billing.domain.Delivery;
 import com.zenskar.billing.domain.DeliveryAttempt;
-import com.zenskar.billing.domain.DeliveryStatus;
 import com.zenskar.billing.domain.Endpoint;
 import com.zenskar.billing.domain.RetryPolicy;
 import com.zenskar.billing.repository.DeliveryRepository;
@@ -95,81 +93,61 @@ public class DispatchService {
         Delivery delivery = deliveryRepository.findByEventId(eventId)
                 .orElseThrow(() -> new IllegalStateException("delivery missing: " + eventId));
 
-        // Defensive: if the recovery service already marked this attempt as CRASH
-        // and re-pended the delivery, a late-arriving HTTP completion can race in.
-        // Honor the recovery's verdict — the receiver may or may not have seen the
-        // first request, but the attempt history must reflect the crash, not the
-        // late success. The same Delivery row gets a new attempt next dispatch.
-        DeliveryAttempt attempt = delivery.getAttempts().stream()
-                .filter(a -> a.getAttemptNo() == attemptNo)
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException(
-                        "attempt missing: event_id=" + eventId + " attempt_no=" + attemptNo));
-        if (attempt.getOutcome() != null) {
-            log.info("Late HTTP result for already-recorded attempt — ignoring event_id={} attempt={}",
-                    eventId, attemptNo);
-            return;
-        }
-        if (delivery.getStatus() != DeliveryStatus.IN_FLIGHT) {
-            log.info("Late HTTP result for delivery no longer IN_FLIGHT — ignoring event_id={} status={}",
-                    eventId, delivery.getStatus());
-            return;
-        }
-
-        attempt.record(result.outcome(), result.statusCode(), result.latencyMs(), result.error(), now);
+        // The aggregate owns the decision (success / retry / dead-letter) and absorbs
+        // late or out-of-order async completions — e.g. if the recovery sweep already
+        // marked this attempt as CRASH and re-pended the row, it returns IGNORED_* and
+        // we honor that verdict rather than overwriting the crash with a late success.
+        Delivery.Transition transition = delivery.recordAttemptResult(
+                attemptNo, result.outcome(), result.statusCode(), result.latencyMs(), result.error(),
+                retryPolicy, now);
 
         String endpointId = delivery.getEndpointId();
+        switch (transition) {
+            case IGNORED_DUPLICATE -> {
+                log.info("Late HTTP result for already-recorded attempt — ignoring event_id={} attempt={}",
+                        eventId, attemptNo);
+                return;
+            }
+            case IGNORED_NOT_IN_FLIGHT -> {
+                log.info("Late HTTP result for delivery no longer IN_FLIGHT — ignoring event_id={} status={}",
+                        eventId, delivery.getStatus());
+                return;
+            }
+            default -> { /* a real transition occurred — persist and notify below */ }
+        }
+
+        deliveryRepository.save(delivery);
+
         eventLog.httpRequestSent(eventId, endpointId, attemptNo, result.latencyMs());
         if (result.statusCode() != null) {
             eventLog.httpResponseReceived(eventId, endpointId, result.statusCode(), result.latencyMs());
         }
 
         AttemptOutcome outcome = result.outcome();
-        if (outcome == AttemptOutcome.SUCCESS) {
-            delivery.succeed(now);
-            deliveryRepository.save(delivery);
-            eventLog.deliverySucceeded(eventId, endpointId, delivery.getAttemptCount());
-            log.info("Delivery succeeded event_id={} attempts={}", eventId, delivery.getAttemptCount());
-            events.publishEvent(new DeliverySucceededEvent(eventId, endpointId,
-                    delivery.getAttemptCount(), now));
-            return;
+        switch (transition) {
+            case SUCCEEDED -> {
+                eventLog.deliverySucceeded(eventId, endpointId, delivery.getAttemptCount());
+                log.info("Delivery succeeded event_id={} attempts={}", eventId, delivery.getAttemptCount());
+                events.publishEvent(new DeliverySucceededEvent(eventId, endpointId,
+                        delivery.getAttemptCount(), now));
+            }
+            case RETRY_SCHEDULED -> {
+                events.publishEvent(new DeliveryFailedEvent(eventId, endpointId, attemptNo,
+                        outcome, result.statusCode(), now));
+                eventLog.retryScheduled(eventId, endpointId, attemptNo, outcome.name(), result.statusCode());
+                log.info("Scheduled retry event_id={} attempt={} next_attempt_at={} outcome={}",
+                        eventId, attemptNo, delivery.getNextAttemptAt(), outcome);
+            }
+            case DEAD_LETTERED -> {
+                events.publishEvent(new DeliveryFailedEvent(eventId, endpointId, attemptNo,
+                        outcome, result.statusCode(), now));
+                String reason = delivery.getDeadLetterReason();
+                eventLog.deliveryAbandoned(eventId, endpointId, attemptNo, reason, result.statusCode());
+                log.warn("Dead-lettered event_id={} reason={}", eventId, reason);
+                events.publishEvent(new DeliveryDeadLetteredEvent(eventId, endpointId,
+                        delivery.getAttemptCount(), reason, now));
+            }
+            default -> { /* unreachable: IGNORED_* returned above */ }
         }
-
-        // Failure path. Decide retry vs dead-letter.
-        events.publishEvent(new DeliveryFailedEvent(eventId, delivery.getEndpointId(), attemptNo,
-                outcome, result.statusCode(), now));
-
-        if (outcome == AttemptOutcome.PERMANENT_FAILURE) {
-            String detail = result.statusCode() != null
-                    ? "status=" + result.statusCode()
-                    : result.error();
-            String reason = "permanent_failure (" + detail + ")";
-            delivery.deadLetter(reason, now);
-            deliveryRepository.save(delivery);
-            eventLog.deliveryAbandoned(eventId, endpointId, attemptNo, reason, result.statusCode());
-            log.warn("Dead-lettered (permanent) event_id={} reason={}", eventId, reason);
-            events.publishEvent(new DeliveryDeadLetteredEvent(eventId, endpointId,
-                    delivery.getAttemptCount(), reason, now));
-            return;
-        }
-
-        Optional<Duration> nextDelay = retryPolicy.nextDelay(attemptNo);
-        if (nextDelay.isEmpty()) {
-            String reason = "max_attempts_exceeded (" + retryPolicy.maxAttempts() + ")";
-            delivery.deadLetter(reason, now);
-            deliveryRepository.save(delivery);
-            eventLog.deliveryAbandoned(eventId, endpointId, attemptNo, reason, result.statusCode());
-            log.warn("Dead-lettered (exhausted) event_id={} reason={}", eventId, reason);
-            events.publishEvent(new DeliveryDeadLetteredEvent(eventId, endpointId,
-                    delivery.getAttemptCount(), reason, now));
-            return;
-        }
-
-        Instant next = now.plus(nextDelay.get());
-        delivery.scheduleRetry(next);
-        deliveryRepository.save(delivery);
-        eventLog.retryScheduled(eventId, endpointId, attemptNo, outcome.name(), result.statusCode());
-        log.info("Scheduled retry event_id={} attempt={} next_attempt_at={} outcome={}",
-                eventId, attemptNo, next, outcome);
     }
 }

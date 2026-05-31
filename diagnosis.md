@@ -41,9 +41,9 @@ delivery instead of retrying. This is most of what Globex is seeing
 (Ticket #4821) — though see #4 for the other half.
 
 **Root cause.** The legacy `Outcome handling` description states verbatim:
-*"If the call returns a non-2xx response or times out (5-second timeout),
+_"If the call returns a non-2xx response or times out (5-second timeout),
 the worker writes the response/timeout line, writes a delivery_abandoned
-line, and moves on. There is no retry."* The architecture conflates
+line, and moves on. There is no retry."_ The architecture conflates
 "non-2xx" with "permanent failure". A 500 from a transiently overloaded
 receiver is treated identically to a 400 from a malformed payload.
 
@@ -81,11 +81,11 @@ events.
 endpoint is slow. Acme reported this in Ticket #4837 for the 12:15–12:50
 window: "one slow customer shouldn't be slowing down everyone."
 
-**Root cause.** The legacy `Architecture` description states: *"There is one
+**Root cause.** The legacy `Architecture` description states: _"There is one
 in-memory FIFO queue of pending deliveries. There is one worker thread that
 pulls events off the queue, makes the HTTP call, logs the outcome, and moves
 on to the next event. Events from all customer endpoints share the same
-queue and the same worker."* Every event behind a slow one waits its turn.
+queue and the same worker."_ Every event behind a slow one waits its turn.
 
 **Evidence in the log** (Q6 in the script — dispatch latency, defined as
 `dispatch_started.ts − event_submitted.ts`, bucketed by 30-minute windows):
@@ -109,8 +109,8 @@ By endpoint: {'ep_acme': 2}
 ```
 
 Two of Acme's own HTTP calls took 4.86s and 4.88s each — just under the 5s
-timeout. While the single worker was blocked on those two calls, *everything
-else queued behind them.* Ironically, Acme is both the cause of the delay
+timeout. While the single worker was blocked on those two calls, _everything
+else queued behind them._ Ironically, Acme is both the cause of the delay
 (their endpoint was slow) and the loudest victim (their low-volume
 `subscription.updated` events also got delayed). The architecture makes any
 endpoint's slowness everyone's slowness.
@@ -130,8 +130,8 @@ their non-idempotent endpoint double-credited the customer.
 **Root cause.** The supervisor's recovery rule re-queues events that crashed
 mid-flight. But there is no protocol that lets the receiver distinguish the
 re-dispatch from a fresh event. From the architecture description:
-*"the supervisor's recovery logic re-queues any event that was dispatched
-but had no terminal log line."* This is correct behavior for our side — it's
+_"the supervisor's recovery logic re-queues any event that was dispatched
+but had no terminal log line."_ This is correct behavior for our side — it's
 the only safe assumption — but the missing piece is a stable header that
 gives the receiver an idempotency key.
 
@@ -168,10 +168,10 @@ Without a fix, any future crash-during-send is a customer-visible duplicate.
 
 **Symptom.** Globex (Ticket #4821) reports they receive only ~60% of expected
 `payment.failed` events. They can confirm via their access logs that the
-missing ones *never arrive at all* — not even as a failed POST.
+missing ones _never arrive at all_ — not even as a failed POST.
 
 **Root cause.** The supervisor's recovery rule only fires when the worker
-*crashes detectably* (the supervisor sees the process die). If the worker
+_crashes detectably_ (the supervisor sees the process die). If the worker
 **hangs** (HTTP library deadlock, GC pause, network stack stall, etc.) the
 process is alive, the supervisor sees no crash, and no re-queue happens.
 The event sits in the in-memory queue between `dispatch_started` and
@@ -237,8 +237,8 @@ behind it.
 **Symptom.** Not visible in this log window. Visible as a property of the
 architecture description.
 
-**Root cause.** The legacy description states: *"There is one in-memory FIFO
-queue of pending deliveries."* If the entire process restarts (deploy,
+**Root cause.** The legacy description states: _"There is one in-memory FIFO
+queue of pending deliveries."_ If the entire process restarts (deploy,
 OOM-kill, host reboot, supervisor itself dies), every event in the queue
 that has not yet been dispatched is lost. The supervisor's recovery rule
 only handles a worker crash within the same process — a full process
@@ -311,7 +311,7 @@ is manual log archaeology.
 ## Compound failure: how Globex's "60% delivery rate" actually composes
 
 Globex's specific complaint is the most informative because it almost
-certainly compounds *three* of the defects above:
+certainly compounds _three_ of the defects above:
 
 1. **Failure mode #4** (orphaned in-flight) accounts for some loss with
    zero log signature. We see one such orphan for `ep_globex` in this
@@ -335,13 +335,13 @@ large.
 
 For traceability with `design.md`:
 
-| # | Failure mode | Fix in rebuild |
-|---|---|---|
-| 1 | No retry on 5xx | `RetryPolicy` with an exponential backoff schedule; outcome classification |
-| 2 | Single queue, single worker | Per-endpoint claim + async I/O dispatch (S4) |
-| 3 | Crash → silent duplicate | Stable `X-Billing-Event-Id` header contract (S6) |
-| 4 | Orphan in-flight | DB-backed leases + `RecoveryService` periodic sweep |
-| 5 | `non_2xx` lumps everything | `AttemptOutcome` enum + status-class routing |
-| 6 | Non-durable queue | All state in DB; `submit()` is the durable boundary |
-| 7 | No endpoint health | `EndpointHealth` state machine + `query("endpoint_status", …)` |
-| 8 | No DLQ | `DEAD_LETTERED` state + `query("dead_letters", since=…)` |
+| #   | Failure mode                | Fix in rebuild                                                             |
+| --- | --------------------------- | -------------------------------------------------------------------------- |
+| 1   | No retry on 5xx             | `RetryPolicy` with an exponential backoff schedule; outcome classification |
+| 2   | Single queue, single worker | Per-endpoint claim + async I/O dispatch (S4)                               |
+| 3   | Crash → silent duplicate    | Stable `X-Billing-Event-Id` header contract (S6)                           |
+| 4   | Orphan in-flight            | DB-backed leases + `RecoveryService` periodic sweep                        |
+| 5   | `non_2xx` lumps everything  | `AttemptOutcome` enum + status-class routing                               |
+| 6   | Non-durable queue           | All state in DB; `submit()` is the durable boundary                        |
+| 7   | No endpoint health          | `EndpointHealth` state machine + `query("endpoint_status", …)`             |
+| 8   | No DLQ                      | `DEAD_LETTERED` state + `query("dead_letters", since=…)`                   |

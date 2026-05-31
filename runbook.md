@@ -9,11 +9,11 @@ made queryable that the legacy service didn't.
 
 Three different shapes, three different paths through this runbook:
 
-| Customer says | This runbook section |
-|---|---|
-| "events never reach us at all" | §1 — silent loss |
-| "we got the same event twice" | §2 — duplicates |
-| "events arrive late / in bursts" | §3 — delays |
+| Customer says                    | This runbook section |
+| -------------------------------- | -------------------- |
+| "events never reach us at all"   | §1 — silent loss     |
+| "we got the same event twice"    | §2 — duplicates      |
+| "events arrive late / in bursts" | §3 — delays          |
 
 Whatever the shape, ask the customer for:
 
@@ -126,7 +126,7 @@ Reply to the customer with:
 
 ### 2b. If they DID see two different `event_id`s
 
-Then this is a duplicate at the *source* — the upstream billing service
+Then this is a duplicate at the _source_ — the upstream billing service
 called `submit()` twice with different `event_id`s for the same logical
 event. Not a dispatcher problem. Escalate to billing.
 

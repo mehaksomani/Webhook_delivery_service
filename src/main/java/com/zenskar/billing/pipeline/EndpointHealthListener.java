@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Optional;
 
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Limit;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
@@ -86,7 +87,15 @@ public class EndpointHealthListener {
         EndpointHealth previous = endpoint.getHealth();
         EndpointHealth target = healthPolicy.evaluate(failures, consecutiveFailures);
         endpoint.applyHealth(target);
-        endpointRepository.save(endpoint);
+        try {
+            endpointRepository.save(endpoint);
+        } catch (OptimisticLockingFailureException e) {
+            // A concurrent attempt for the same endpoint recomputed health first.
+            // Harmless and self-healing: the next attempt re-evaluates from the same
+            // window, so we drop this stale recompute instead of failing the listener.
+            log.debug("Concurrent health update lost for endpoint_id={} — recomputed next attempt", endpointId);
+            return;
+        }
 
         if (previous != target) {
             eventLog.endpointHealthChanged(endpointId, previous.name(), target.name());

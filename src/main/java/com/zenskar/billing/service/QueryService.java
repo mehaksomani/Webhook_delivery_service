@@ -13,7 +13,7 @@ import com.zenskar.billing.domain.EndpointHealth;
 import com.zenskar.billing.repository.DeliveryRepository;
 import com.zenskar.billing.repository.EndpointRepository;
 
-import jakarta.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import lombok.RequiredArgsConstructor;
 
 @Service
@@ -33,15 +33,14 @@ public class QueryService {
                 .orElseThrow(() -> new EndpointNotFoundException("endpoint not found: " + endpointId));
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public List<Delivery> deadLettersSince(Instant since) {
-        // Touch attempts so the returned entities can be inspected outside this TX.
-        List<Delivery> dls = deliveryRepository.findDeadLettersSince(since);
-        dls.forEach(d -> d.getAttempts().size());
-        return dls;
+        // Attempts are eagerly fetched by the repository, so the returned entities
+        // are safe to inspect after the transaction closes.
+        return deliveryRepository.findDeadLettersSince(since);
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public Optional<Delivery> findDelivery(String eventId) {
         return deliveryRepository.findByEventIdWithAttempts(eventId);
     }
