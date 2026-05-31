@@ -337,7 +337,7 @@ For traceability with `design.md`:
 
 | # | Failure mode | Fix in rebuild |
 |---|---|---|
-| 1 | No retry on 5xx | `RetryPolicy` with exponential backoff + jitter; outcome classification |
+| 1 | No retry on 5xx | `RetryPolicy` with an exponential backoff schedule; outcome classification |
 | 2 | Single queue, single worker | Per-endpoint claim + async I/O dispatch (S4) |
 | 3 | Crash → silent duplicate | Stable `X-Billing-Event-Id` header contract (S6) |
 | 4 | Orphan in-flight | DB-backed leases + `RecoveryService` periodic sweep |

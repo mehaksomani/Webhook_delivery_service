@@ -84,7 +84,7 @@ public class BillingConfig {
     @Bean
     public RetryPolicy retryPolicy(BillingProperties props) {
         BillingProperties.Retry r = props.retry();
-        return new RetryPolicy(r.maxAttempts(), r.scheduleSeconds(), r.jitterRatio());
+        return new RetryPolicy(r.maxAttempts(), r.scheduleSeconds());
     }
 
     @Bean

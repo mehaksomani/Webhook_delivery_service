@@ -28,8 +28,7 @@ public record BillingProperties(
 
     public record Retry(
             int maxAttempts,
-            List<Long> scheduleSeconds,
-            double jitterRatio
+            List<Long> scheduleSeconds
     ) {}
 
     public record Health(

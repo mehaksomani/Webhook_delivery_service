@@ -10,7 +10,7 @@ under a lease, and fires HTTP requests through Java's async `HttpClient`
 so one slow endpoint cannot block another (the S4 gate). Each request
 carries an `X-Billing-Event-Id` header that gives receivers a stable
 idempotency key — that header is the S6 contract. Transient failures
-retry on an exponential-backoff-with-jitter schedule; permanent failures
+retry on an exponential backoff schedule; permanent failures
 and exhausted retries terminate to a dead-letter state that is queryable
 by timestamp. Endpoint health is a sliding-window signal
 (`HEALTHY` / `UNHEALTHY`) updated as side effects of attempts.
@@ -32,7 +32,7 @@ by timestamp. Endpoint health is a sliding-window signal
 │     - url, health                                            │
 │                                                              │
 │   Pure-domain policies (no Spring imports):                  │
-│     - RetryPolicy    (backoff schedule + jitter)             │
+│     - RetryPolicy    (exponential backoff schedule)          │
 │     - HealthPolicy   (window → HEALTHY/UNHEALTHY)            │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -124,10 +124,10 @@ defaults:
 ```
 max-attempts        : 5      (attempt 1 + 4 retries)
 schedule-seconds    : 1, 5, 25, 120, 600     -- after attempts 1..4 respectively
-jitter-ratio        : 0.2                    -- multiplicative ± 20%
 ```
 
-This is a hard-coded schedule, not a formula. Hard-coded is more
+This is a hard-coded exponential schedule (each step ~5× the previous:
+1, 5, 25, 120, 600s), not a computed formula. Hard-coded is more
 defensible: you can read it and know exactly what's going to happen for a
 given event. The schedule deliberately stretches to 10 minutes because
 endpoint outages typically last minutes, not seconds; retrying every
@@ -137,11 +137,6 @@ second is just noise.
 
 - `Optional<Duration>` of the delay when there is still budget
 - `Optional.empty()` when retries are exhausted — that signals dead-letter
-
-Jitter is **multiplicative ± 20%**. If the base delay is 5s, the actual
-delay is uniformly between 4s and 6s. This breaks up the synchronized
-retry storm when many subscribers' endpoints come back up at the same
-moment after a shared upstream outage.
 
 **Outcome classification** (in `AttemptOutcome.fromStatus`):
 
