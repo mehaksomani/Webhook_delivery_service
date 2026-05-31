@@ -17,12 +17,9 @@ import lombok.NoArgsConstructor;
 /**
  * A subscriber endpoint: a customer-configured URL that receives billing POSTs.
  * <p>
- * Health is a computed-and-cached value: the {@code EndpointHealthListener} updates it
- * after each attempt based on the recent window in {@code delivery_attempts}. We cache
- * here so the {@code query("endpoint_status", …)} call is O(1).
- * <p>
- * When health = TRIPPED, {@code trippedUntil} is set; the scheduler skips this endpoint
- * until then, then allows a single probe attempt.
+ * Health is computed-and-cached: {@code EndpointHealthListener} updates it after
+ * each attempt from the recent window in {@code delivery_attempts}, so the
+ * {@code query("endpoint_status", …)} call is O(1).
  */
 @Entity
 @Table(name = "endpoints")
@@ -43,9 +40,6 @@ public class Endpoint {
     @Enumerated(EnumType.STRING)
     @Column(name = "health", nullable = false, length = 16)
     private EndpointHealth health;
-
-    @Column(name = "tripped_until")
-    private Instant trippedUntil;
 
     @Version
     @Column(name = "version", nullable = false)
@@ -70,12 +64,7 @@ public class Endpoint {
     }
 
     /** Used by {@code EndpointHealthListener} to apply the policy decision. */
-    public void applyHealth(EndpointHealth target, Instant trippedUntil) {
+    public void applyHealth(EndpointHealth target) {
         this.health = target;
-        this.trippedUntil = target == EndpointHealth.TRIPPED ? trippedUntil : null;
-    }
-
-    public boolean isTripped(Instant now) {
-        return health == EndpointHealth.TRIPPED && trippedUntil != null && now.isBefore(trippedUntil);
     }
 }

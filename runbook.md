@@ -73,15 +73,13 @@ Look at `dead_letter_reason`:
 GET /api/v1/endpoints/{endpointId}/status
 ```
 
-Returns one of: `HEALTHY`, `DEGRADED`, `TRIPPED`.
+Returns one of: `HEALTHY`, `UNHEALTHY`.
 
-- `TRIPPED` → the endpoint has been failing badly. Look at the recent
+- `UNHEALTHY` → the endpoint has been failing. Look at the recent
   attempts (in `GET /api/v1/deliveries/{eventId}` for the dead-lettered
   events) to see what the receiver was returning. Almost certainly an
   outage on the customer side. Communicate that to them with evidence
   (timestamps + status codes).
-- `DEGRADED` → some recent failures, mostly working. Ask the customer
-  about flaky behavior at the timestamps in the attempt history.
 - `HEALTHY` → not the endpoint itself. Move on to §1d.
 
 ### 1d. Check the queue depth
@@ -146,7 +144,7 @@ GET /api/v1/endpoints/{endpointId}/status
 GET /api/v1/queues/{endpointId}/depth
 ```
 
-- `DEGRADED` or `TRIPPED` with high queue depth → their endpoint is the
+- `UNHEALTHY` with high queue depth → their endpoint is the
   bottleneck. Share their own status code + latency data from recent
   `DeliveryView`s.
 - `HEALTHY` with high queue depth → unusual; check dispatcher logs.
@@ -203,19 +201,20 @@ UPDATE deliveries SET attempt_count = 0 WHERE event_id = ?;
 
 The scheduler will pick it up on the next tick.
 
-### Force-trip an endpoint (planned maintenance)
+### Mark an endpoint unhealthy (planned maintenance)
 
 If a customer tells you ahead of time they're doing maintenance:
 
 ```sql
 UPDATE endpoints
-SET health = 'TRIPPED',
-    tripped_until = now() + interval '1 hour'
+SET health = 'UNHEALTHY'
 WHERE endpoint_id = ?;
 ```
 
-(In a future version this would be a proper admin endpoint; for now the
-DB write is acceptable for the on-call workflow.)
+This is a visibility marker only today (health does not yet gate
+scheduling). In a future version this would be a proper admin endpoint
+plus a scheduling skip; for now the DB write is acceptable for the
+on-call workflow.
 
 ## 5. What changed vs. the legacy debug flow
 

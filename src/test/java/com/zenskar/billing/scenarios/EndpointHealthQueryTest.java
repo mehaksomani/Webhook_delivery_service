@@ -14,9 +14,8 @@ import com.zenskar.billing.domain.EndpointHealth;
 
 /**
  * S8 — Endpoint health query.
- * The query must return a status that changes observably with delivery
- * outcomes. We define three states (documented in design.md):
- * HEALTHY, DEGRADED, TRIPPED.
+ * The query returns a status that changes observably with delivery outcomes:
+ * HEALTHY or UNHEALTHY (documented in design.md).
  */
 class EndpointHealthQueryTest extends AbstractScenarioTest {
 
@@ -26,18 +25,17 @@ class EndpointHealthQueryTest extends AbstractScenarioTest {
         registerEndpoint("ep-s8", "/s8");
         assertThat(queryService.endpointStatus("ep-s8")).isEqualTo(EndpointHealth.HEALTHY);
 
-        // Fail every request so health degrades and eventually trips.
+        // Fail every request so the endpoint turns UNHEALTHY.
         wireMock.stubFor(post(urlEqualTo("/s8")).willReturn(aResponse().withStatus(500)));
 
         for (int i = 0; i < 6; i++) {
             submit("evt-s8-" + i, "ep-s8");
         }
 
-        // After enough failures (3 consecutive in test config) the endpoint trips.
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
                 assertThat(queryService.endpointStatus("ep-s8"))
-                        .as("endpoint should TRIP after consecutive failures")
-                        .isEqualTo(EndpointHealth.TRIPPED));
+                        .as("endpoint should be UNHEALTHY after repeated failures")
+                        .isEqualTo(EndpointHealth.UNHEALTHY));
     }
 
     @Test
