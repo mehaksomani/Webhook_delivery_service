@@ -30,4 +30,14 @@ public record HttpDeliveryResult(
     public static HttpDeliveryResult ioError(long latencyMs, String message) {
         return new HttpDeliveryResult(AttemptOutcome.RETRIABLE_FAILURE, null, latencyMs, message);
     }
+
+    /**
+     * The target URL was rejected before the request went out (SSRF guard,
+     * malformed URL). Treated as a permanent failure — a blocked or invalid
+     * target will not become valid on retry, so the delivery should dead-letter
+     * rather than consume retry budget.
+     */
+    public static HttpDeliveryResult invalidTarget(long latencyMs, String message) {
+        return new HttpDeliveryResult(AttemptOutcome.PERMANENT_FAILURE, null, latencyMs, message);
+    }
 }

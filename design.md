@@ -12,8 +12,8 @@ carries an `X-Billing-Event-Id` header that gives receivers a stable
 idempotency key — that header is the S6 contract. Transient failures
 retry on an exponential-backoff-with-jitter schedule; permanent failures
 and exhausted retries terminate to a dead-letter state that is queryable
-by timestamp. Endpoint health is a sliding-window state machine
-(`HEALTHY` / `DEGRADED` / `TRIPPED`) updated as side effects of attempts.
+by timestamp. Endpoint health is a sliding-window signal
+(`HEALTHY` / `UNHEALTHY`) updated as side effects of attempts.
 
 ## Bounded context and aggregates
 
@@ -29,24 +29,25 @@ by timestamp. Endpoint health is a sliding-window state machine
 │                                                              │
 │   Aggregate: Endpoint (root)                                 │
 │     - identity = endpoint_id                                 │
-│     - url, health, tripped_until                             │
+│     - url, health                                            │
 │                                                              │
 │   Pure-domain policies (no Spring imports):                  │
 │     - RetryPolicy    (backoff schedule + jitter)             │
-│     - HealthPolicy   (window → HEALTHY/DEGRADED/TRIPPED)     │
+│     - HealthPolicy   (window → HEALTHY/UNHEALTHY)            │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 The package tree — organised by responsibility, not by DDD layer name:
 
 ```
-com.zenskar.webhook
-├── config/        WebhookConfig (bean wiring) + WebhookProperties (nested records)
+com.zenskar.billing
+├── config/        BillingConfig (bean wiring) + BillingProperties (nested records)
 ├── domain/        Delivery, DeliveryAttempt, Endpoint + enums + RetryPolicy + HealthPolicy
 │                  — framework-free; no Spring imports
 ├── events/        DeliverySucceeded, DeliveryFailed, DeadLettered, HealthChanged
-├── http/          WebhookHttpClient (JDK async) + HttpDeliveryResult
-├── persistence/   Spring Data repository interfaces
+├── http/          BillingHttpClient (JDK async) + HttpDeliveryResult
+├── repository/    Spring Data repository interfaces
+├── security/      UrlPolicy (SSRF guard for outbound delivery targets)
 ├── service/       API-facing services called from the controller:
 │                  Submit, Endpoint, Query + their command records
 ├── pipeline/      Background runtime (no controller ever calls these directly):
@@ -54,7 +55,7 @@ com.zenskar.webhook
 │                  (start/record attempt) + DispatchTask + RecoveryService
 │                  (stale-lease sweep) + EndpointHealthListener
 │                  (AFTER_COMMIT listener that maintains endpoint health)
-└── web/           WebhookController (single REST controller) + ApiExceptions
+└── web/           BillingController (single REST controller) + ApiExceptions
                    + GlobalExceptionHandler + dto/ for request and view records
 ```
 
@@ -180,9 +181,9 @@ even under concurrency (covered by `IdempotentResubmitTest`).
 Every outbound POST carries:
 
 ```
-X-Billing-Event-Id:         <event_id>
-X-Webhook-Event-Type:       <event_type>
-X-Webhook-Delivery-Attempt: <n>
+X-Billing-Event-Id:          <event_id>
+X-Billing-Event-Type:        <event_type>
+X-Billing-Delivery-Attempt:  <n>
 ```
 
 **The contract published to subscribers (would live in customer-facing
@@ -200,15 +201,15 @@ delivery from a re-delivery after our worker crashed mid-send. With it,
 the receiver checks an `event_id` table on their side and rejects
 duplicates.
 
-The `X-Webhook-Delivery-Attempt` header is for the runbook: when a
+The `X-Billing-Delivery-Attempt` header is for the runbook: when a
 customer asks "is this attempt 1 or a retry?", the answer is in their
 own request log.
 
 ## Endpoint state model
 
-Each `Endpoint` aggregate caches a health value: `HEALTHY`, `DEGRADED`,
-`TRIPPED`. The `query("endpoint_status", endpoint_id)` call returns this
-cached value in O(1) — no aggregation at query time.
+Each `Endpoint` aggregate caches a health value: `HEALTHY` or `UNHEALTHY`.
+The `query("endpoint_status", endpoint_id)` call returns this cached value
+in O(1) — no aggregation at query time.
 
 The cache is maintained by `EndpointHealthListener`, which listens for
 `DeliverySucceededEvent` and `DeliveryFailedEvent` and runs in a separate
@@ -218,7 +219,7 @@ transaction (`@Async @TransactionalEventListener` style, here as
 ```
 1. Load the last N completed attempts for this endpoint (N = window_size)
 2. Count failures in that window + count trailing consecutive failures
-3. Ask HealthPolicy.evaluate(failures, consecutive) → target state
+3. Ask HealthPolicy.evaluate(failures, consecutive) → HEALTHY | UNHEALTHY
 4. Apply transition, save endpoint
 5. If state changed, publish EndpointHealthChangedEvent
 ```
@@ -227,23 +228,19 @@ transaction (`@Async @TransactionalEventListener` style, here as
 
 ```
 window-size            : 20
-degraded-failures      : 3      -- "≥3 failures in last 20 → DEGRADED"
-tripped-failures       : 10     -- "≥10 failures in last 20 → TRIPPED"
-tripped-consecutive    : 5      -- "≥5 in a row failures → TRIPPED"
-tripped-cooldown       : 60s    -- "TRIPPED for 60s then probe again"
+failure-threshold      : 10     -- "≥10 failures in last 20 → UNHEALTHY"
+consecutive-threshold  : 5      -- "≥5 in a row failures → UNHEALTHY"
 ```
 
-The two `TRIPPED` triggers are deliberate: a high-volume endpoint may
-accumulate 10 failures of 20 (definitely tripped); a low-volume endpoint
-may only see 5 attempts but all 5 fail (also tripped). Either signal trips
-the endpoint.
+The two `UNHEALTHY` triggers are deliberate: a high-volume endpoint may
+accumulate 10 failures of 20; a low-volume endpoint may only see 5 attempts
+but all 5 fail. Either signal marks the endpoint unhealthy.
 
-A future enhancement is "respect tripped during scheduling": if an
-endpoint is `TRIPPED`, the scheduler should defer its pending events
-until `tripped_until`. The cache is already there; the scheduler-side
-check is one line. I left it out of v1 because the test config's
-cooldown is 1s — pushing `next_attempt_at` would race with the test's
-own timing. For production, this is a one-line change.
+A future enhancement is "respect health during scheduling": if an endpoint
+is `UNHEALTHY`, the scheduler could defer its pending events for a cooldown
+and then allow a single probe. The cached signal is already there; the
+scheduler-side check is small. Left out of v1 to keep test timing
+deterministic.
 
 ## Crash safety (S6)
 
@@ -328,12 +325,35 @@ spec is silent on this but tests need it.
   `releaseLease`) — these document the legal lifecycle and stop callers
   from setting `status` directly.
 
-- **No HMAC payload signing in v1.** A real production webhook service
-  must HMAC-sign every payload so receivers can verify origin. Out of
-  scope here; it's a header + a shared secret per endpoint, plus a
-  worked example in customer docs. Two-hour follow-up, not redesign.
+- **SSRF guard on delivery targets.** Because the dispatcher POSTs to
+  caller-supplied URLs, `UrlPolicy` (in `security/`) restricts targets to
+  `http`/`https` and — with `billing.security.block-private-addresses=true`
+  — rejects hosts that resolve to loopback, link-local (incl. the
+  `169.254.169.254` cloud-metadata endpoint), or RFC-1918 ranges. It runs at
+  registration (reject early) and again at delivery time (DNS rebinding
+  defense). Tests disable address-blocking so WireMock on `127.0.0.1` stays a
+  valid target.
 
-- **No tripped-endpoint scheduling skip in v1.** Health *tracking* is in;
+- **Structured JSONL delivery log alongside the query API.** Observability is
+  not only the DB/query API: `DeliveryEventLog` emits the delivery lifecycle as
+  JSONL (`logs/webhook_delivery.jsonl`) in the same schema as the legacy log, so
+  `tools/diagnose.py` runs against the rebuild's own output. The query API is for
+  live "what's the state now?"; the log is for post-hoc "what happened?" forensics
+  when the app may be down. It's a dedicated file-only stream so it stays pure JSON.
+
+- **No authentication on the API yet.** The inbound REST surface is
+  currently open. In production this needs an API key / mTLS in front of it,
+  and the read endpoints (`/dead-letters`, `/deliveries/{id}`) must be
+  operator-only since they expose payloads. Called out as the top remaining
+  security gap.
+
+- **No HMAC payload signing in v1.** A real production webhook service
+  should HMAC-sign every payload so receivers can verify origin. Out of
+  scope here; it's a header + a shared secret per endpoint, plus a
+  worked example in customer docs. Two-hour follow-up, not redesign — and
+  lower priority than the SSRF guard above and inbound auth.
+
+- **No unhealthy-endpoint scheduling skip in v1.** Health *tracking* is in;
   health-based *throttling* is one if-statement at the top of
   `dispatchEndpoint`. Left out to keep test timing deterministic; called
   out explicitly in design.

@@ -19,6 +19,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import com.zenskar.billing.domain.HealthPolicy;
 import com.zenskar.billing.domain.RetryPolicy;
 import com.zenskar.billing.http.BillingHttpClient;
+import com.zenskar.billing.security.UrlPolicy;
 
 /**
  * All Spring bean wiring for the dispatcher. Kept in one file because for a
@@ -67,9 +68,17 @@ public class BillingConfig {
                 .build();
     }
 
+    /** SSRF guard for delivery targets, configured from {@code billing.security.*}. */
     @Bean
-    public BillingHttpClient billingHttpClient(HttpClient httpClient, BillingProperties props) {
-        return new BillingHttpClient(httpClient, Duration.ofSeconds(props.dispatcher().httpTimeoutSeconds()));
+    public UrlPolicy urlPolicy(BillingProperties props) {
+        BillingProperties.Security s = props.security();
+        return new UrlPolicy(s.allowedSchemes(), s.blockPrivateAddresses());
+    }
+
+    @Bean
+    public BillingHttpClient billingHttpClient(HttpClient httpClient, BillingProperties props, UrlPolicy urlPolicy) {
+        return new BillingHttpClient(
+                httpClient, Duration.ofSeconds(props.dispatcher().httpTimeoutSeconds()), urlPolicy);
     }
 
     @Bean
@@ -81,12 +90,6 @@ public class BillingConfig {
     @Bean
     public HealthPolicy healthPolicy(BillingProperties props) {
         BillingProperties.Health h = props.health();
-        return new HealthPolicy(
-                h.windowSize(),
-                h.degradedFailures(),
-                h.trippedFailures(),
-                h.trippedConsecutive(),
-                Duration.ofSeconds(h.trippedCooldownSeconds())
-        );
+        return new HealthPolicy(h.windowSize(), h.failureThreshold(), h.consecutiveThreshold());
     }
 }

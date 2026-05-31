@@ -14,7 +14,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record BillingProperties(
         Dispatcher dispatcher,
         Retry retry,
-        Health health
+        Health health,
+        Security security
 ) {
 
     public record Dispatcher(
@@ -33,9 +34,17 @@ public record BillingProperties(
 
     public record Health(
             int windowSize,
-            int degradedFailures,
-            int trippedFailures,
-            int trippedConsecutive,
-            long trippedCooldownSeconds
+            int failureThreshold,
+            int consecutiveThreshold
+    ) {}
+
+    /**
+     * SSRF guard for outbound delivery targets. {@code blockPrivateAddresses}
+     * defaults to true in production; tests disable it so WireMock on localhost
+     * remains a valid target. See {@link com.zenskar.billing.security.UrlPolicy}.
+     */
+    public record Security(
+            List<String> allowedSchemes,
+            boolean blockPrivateAddresses
     ) {}
 }

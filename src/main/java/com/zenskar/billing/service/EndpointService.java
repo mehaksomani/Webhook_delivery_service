@@ -8,7 +8,7 @@ import org.springframework.stereotype.Service;
 import com.zenskar.billing.web.ApiExceptions.EndpointNotFoundException;
 import com.zenskar.billing.domain.Endpoint;
 import com.zenskar.billing.repository.EndpointRepository;
-import com.zenskar.billing.service.RegisterEndpointCommand;
+import com.zenskar.billing.security.UrlPolicy;
 
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
@@ -20,10 +20,14 @@ import lombok.extern.slf4j.Slf4j;
 public class EndpointService {
 
     private final EndpointRepository endpointRepository;
+    private final UrlPolicy urlPolicy;
     private final Clock clock;
 
     @Transactional
     public Endpoint register(RegisterEndpointCommand cmd) {
+        // SSRF guard: reject internal / metadata / non-http(s) targets up front so
+        // a bad URL never enters the system. Re-checked at delivery time too.
+        urlPolicy.validate(cmd.url());
         return endpointRepository.findById(cmd.endpointId())
                 .map(existing -> {
                     existing.updateUrl(cmd.url());

@@ -9,6 +9,8 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
+import com.zenskar.billing.security.UrlPolicy;
+
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -21,10 +23,12 @@ public class BillingHttpClient {
 
     private final HttpClient httpClient;
     private final Duration requestTimeout;
+    private final UrlPolicy urlPolicy;
 
-    public BillingHttpClient(HttpClient httpClient, Duration httpRequestTimeout) {
+    public BillingHttpClient(HttpClient httpClient, Duration httpRequestTimeout, UrlPolicy urlPolicy) {
         this.httpClient = httpClient;
         this.requestTimeout = httpRequestTimeout;
+        this.urlPolicy = urlPolicy;
     }
 
     public CompletableFuture<HttpDeliveryResult> deliver(
@@ -36,8 +40,22 @@ public class BillingHttpClient {
 
         long startedNanos = System.nanoTime();
 
+        // Re-validate at delivery time: DNS can rebind between registration and
+        // send, so a target that resolved to a public address at registration
+        // may now resolve to an internal one. Returning a completed future (rather
+        // than throwing) keeps the caller's in-flight bookkeeping balanced.
+        URI uri;
+        try {
+            uri = urlPolicy.validate(url);
+        } catch (RuntimeException e) {
+            long latencyMs = (System.nanoTime() - startedNanos) / 1_000_000L;
+            log.warn("Blocked delivery target event_id={} url={} reason={}", eventId, url, e.getMessage());
+            return CompletableFuture.completedFuture(
+                    HttpDeliveryResult.invalidTarget(latencyMs, "blocked target: " + e.getMessage()));
+        }
+
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
+                .uri(uri)
                 .timeout(requestTimeout)
                 .header("Content-Type", "application/json")
                 .header("X-Billing-Event-Id", eventId)

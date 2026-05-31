@@ -14,8 +14,6 @@ import org.springframework.stereotype.Component;
 
 import com.zenskar.billing.domain.Delivery;
 import com.zenskar.billing.repository.DeliveryRepository;
-import com.zenskar.billing.pipeline.DispatchService;
-import com.zenskar.billing.pipeline.DispatchTask;
 import com.zenskar.billing.config.BillingProperties;
 import com.zenskar.billing.http.BillingHttpClient;
 
@@ -91,18 +89,33 @@ public class DeliveryScheduler {
             DispatchTask task = maybe.get();
             counter.incrementAndGet();
 
-            httpClient.deliver(task.url(), task.eventId(), task.eventType(), task.attemptNo(), task.payload())
-                    .whenComplete((result, throwable) -> {
-                        try {
-                            if (result != null) {
-                                dispatchService.recordAttempt(task.eventId(), task.attemptNo(), result);
-                            } else if (throwable != null) {
-                                log.error("HTTP future failed for event_id={}", task.eventId(), throwable);
+            // The increment above is balanced by the decrement in whenComplete. If
+            // deliver(...) throws synchronously (before the future is wired up), the
+            // catch here releases the slot — otherwise a single failure would leak a
+            // permanent in-flight slot and eventually starve the endpoint. The row
+            // stays IN_FLIGHT and the lease sweep re-pends it.
+            try {
+                httpClient.deliver(task.url(), task.eventId(), task.eventType(), task.attemptNo(), task.payload())
+                        .whenComplete((result, throwable) -> {
+                            try {
+                                if (result != null) {
+                                    dispatchService.recordAttempt(task.eventId(), task.attemptNo(), result);
+                                } else if (throwable != null) {
+                                    log.error("HTTP future failed for event_id={}", task.eventId(), throwable);
+                                }
+                            } catch (RuntimeException e) {
+                                // e.g. an optimistic-lock clash recording the attempt. Don't let it
+                                // vanish into the unobserved future; the lease sweep is the backstop.
+                                log.error("Failed to record attempt event_id={} attempt={}",
+                                        task.eventId(), task.attemptNo(), e);
+                            } finally {
+                                counter.decrementAndGet();
                             }
-                        } finally {
-                            counter.decrementAndGet();
-                        }
-                    });
+                        });
+            } catch (RuntimeException e) {
+                counter.decrementAndGet();
+                log.error("Synchronous dispatch failure event_id={}", task.eventId(), e);
+            }
         }
     }
 }
