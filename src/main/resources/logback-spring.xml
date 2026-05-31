@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <!-- Normal plain-text console for framework / operational logs. -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- The delivery lifecycle event stream: pure JSONL, schema-compatible with
+         webhook_delivery.log.jsonl. Each message is already JSON, so the encoder
+         writes it verbatim (%msg). File-only to keep it off the console and out
+         of the dispatch threads' way; tail logs/webhook_delivery.jsonl to watch. -->
+    <appender name="DELIVERY_EVENTS_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/webhook_delivery.jsonl</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>logs/webhook_delivery.%d{yyyy-MM-dd}.jsonl</fileNamePattern>
+            <maxHistory>7</maxHistory>
+        </rollingPolicy>
+        <encoder><pattern>%msg%n</pattern></encoder>
+    </appender>
+
+    <logger name="delivery-events" level="INFO" additivity="false">
+        <appender-ref ref="DELIVERY_EVENTS_FILE"/>
+    </logger>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+</configuration>

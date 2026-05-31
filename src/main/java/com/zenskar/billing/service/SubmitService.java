@@ -11,7 +11,7 @@ import com.zenskar.billing.web.ApiExceptions.InvalidSubmissionException;
 import com.zenskar.billing.domain.Delivery;
 import com.zenskar.billing.repository.DeliveryRepository;
 import com.zenskar.billing.repository.EndpointRepository;
-import com.zenskar.billing.service.SubmitEventCommand;
+import com.zenskar.billing.observability.DeliveryEventLog;
 
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
@@ -24,6 +24,7 @@ public class SubmitService {
 
     private final DeliveryRepository deliveryRepository;
     private final EndpointRepository endpointRepository;
+    private final DeliveryEventLog eventLog;
     private final Clock clock;
 
     @Transactional
@@ -46,6 +47,7 @@ public class SubmitService {
 
         try {
             deliveryRepository.save(d);
+            eventLog.eventSubmitted(cmd.eventId(), cmd.eventType(), cmd.endpointId());
             log.info("Submitted event: event_id={} endpoint_id={} event_type={}",
                     cmd.eventId(), cmd.endpointId(), cmd.eventType());
             return d;

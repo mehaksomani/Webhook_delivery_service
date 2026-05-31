@@ -15,6 +15,7 @@ import com.zenskar.billing.domain.AttemptOutcome;
 import com.zenskar.billing.domain.Delivery;
 import com.zenskar.billing.domain.DeliveryAttempt;
 import com.zenskar.billing.repository.DeliveryRepository;
+import com.zenskar.billing.observability.DeliveryEventLog;
 
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +28,7 @@ public class RecoveryService {
 
     private final DeliveryRepository deliveryRepository;
     private final ApplicationEventPublisher events;
+    private final DeliveryEventLog eventLog;
     private final Clock clock;
 
     /**
@@ -77,6 +79,7 @@ public class RecoveryService {
             d.releaseLease(now);
             deliveryRepository.save(d);
             recovered++;
+            eventLog.workerCrashed(d.getEventId(), d.getEndpointId(), crashedAttemptNo, "worker_crashed_or_hung");
             log.warn("Recovered stale lease event_id={} attempts={} note=re-dispatched_after_lease_expiry",
                     d.getEventId(), d.getAttemptCount());
 

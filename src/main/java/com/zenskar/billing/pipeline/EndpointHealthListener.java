@@ -23,6 +23,7 @@ import com.zenskar.billing.domain.EndpointHealth;
 import com.zenskar.billing.domain.HealthPolicy;
 import com.zenskar.billing.repository.DeliveryAttemptRepository;
 import com.zenskar.billing.repository.EndpointRepository;
+import com.zenskar.billing.observability.DeliveryEventLog;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -43,14 +44,11 @@ public class EndpointHealthListener {
     private final EndpointRepository endpointRepository;
     private final HealthPolicy healthPolicy;
     private final ApplicationEventPublisher events;
+    private final DeliveryEventLog eventLog;
     private final Clock clock;
 
-    // @TransactionalEventListener with AFTER_COMMIT defers invocation until the
-    // publishing transaction (the one that recorded the attempt outcome) has
-    // committed — otherwise our SELECT for the recent attempts could miss the
-    // attempt that just triggered this event. The @Async runs the listener on
-    // a separate thread/transaction so health bookkeeping never holds up the
-    // dispatcher's hot path.
+    // AFTER_COMMIT so our SELECT sees the attempt that triggered this event;
+    // @Async + REQUIRES_NEW keeps health bookkeeping off the dispatcher's hot path.
     @Async
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -70,8 +68,7 @@ public class EndpointHealthListener {
         if (maybe.isEmpty()) return;
         Endpoint endpoint = maybe.get();
 
-        // Most recent first. The repository query already filters out attempts
-        // still in progress (outcome IS NULL), so each row here has a final outcome.
+        // The query already excludes in-progress attempts (outcome IS NULL).
         List<DeliveryAttempt> recent = attemptRepository.findRecentByEndpoint(endpointId,
                 Limit.of(healthPolicy.windowSize()));
         int failures = 0;
@@ -86,21 +83,15 @@ public class EndpointHealthListener {
             }
         }
 
-        HealthPolicy.Decision decision = healthPolicy.evaluate(failures, consecutiveFailures);
         EndpointHealth previous = endpoint.getHealth();
-
-        Instant trippedUntil = decision.target() == EndpointHealth.TRIPPED
-                ? Instant.now(clock).plus(decision.cooldown())
-                : null;
-        endpoint.applyHealth(decision.target(), trippedUntil);
+        EndpointHealth target = healthPolicy.evaluate(failures, consecutiveFailures);
+        endpoint.applyHealth(target);
         endpointRepository.save(endpoint);
 
-        if (previous != endpoint.getHealth()) {
-            log.warn("Endpoint health changed endpoint_id={} from={} to={} cooldown={}",
-                    endpointId, previous, endpoint.getHealth(),
-                    decision.target() == EndpointHealth.TRIPPED ? decision.cooldown() : "n/a");
-            events.publishEvent(new EndpointHealthChangedEvent(endpointId, previous,
-                    endpoint.getHealth(), Instant.now(clock)));
+        if (previous != target) {
+            eventLog.endpointHealthChanged(endpointId, previous.name(), target.name());
+            log.warn("Endpoint health changed endpoint_id={} from={} to={}", endpointId, previous, target);
+            events.publishEvent(new EndpointHealthChangedEvent(endpointId, previous, target, Instant.now(clock)));
         }
     }
 }

@@ -35,6 +35,23 @@ and prints Q1–Q10 — sanity counts, lifecycle shapes, abandonments, orphans,
 the crash trace, dispatch-latency windows, per-endpoint rollups, and the slow
 HTTP calls behind Acme's reported 12:15–12:50 latency spike.
 
+## Structured delivery log
+
+The rebuild emits its own delivery lifecycle as JSONL to
+`logs/webhook_delivery.jsonl`, using the **same schema** as the legacy log
+(`event_submitted`, `dispatch_started`, `http_request_sent`,
+`http_response_received`, `delivery_succeeded`, `retry_scheduled`,
+`delivery_abandoned`, `worker_crashed`, `endpoint_health_changed`). It's a
+dedicated stream (`DeliveryEventLog` → a file-only Logback appender), so it
+stays pure JSON and never mixes with operational console logs.
+
+Because the schema matches, the same diagnostic script runs against the
+rebuild's own output:
+
+```sh
+python3 tools/diagnose.py logs/webhook_delivery.jsonl
+```
+
 ## Repo layout
 
 ```
@@ -50,8 +67,10 @@ src/main/java/com/zenskar/billing/
 ├── domain/                      Delivery, DeliveryAttempt, Endpoint, RetryPolicy, HealthPolicy
 ├── events/                      Domain events
 ├── http/BillingHttpClient.java  JDK HttpClient.sendAsync I/O loop (S4)
+├── observability/               DeliveryEventLog (JSONL lifecycle stream)
 ├── pipeline/                    DeliveryScheduler (S4), DispatchService, RecoveryService (S6), EndpointHealthListener (S8)
 ├── repository/                  Spring Data JPA repositories
+├── security/                    UrlPolicy (SSRF guard)
 ├── service/                     Submit, Query, Endpoint registration + commands
 └── web/                         REST controller + DTOs + GlobalExceptionHandler
 

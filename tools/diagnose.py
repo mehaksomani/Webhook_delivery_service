@@ -4,9 +4,12 @@ Diagnostic queries against webhook_delivery.log.jsonl.
 
 Zero-dep (stdlib only). Run from the repo root:
 
-    python3 tools/diagnose.py
+    python3 tools/diagnose.py                          # the legacy log (default)
+    python3 tools/diagnose.py logs/webhook_delivery.jsonl   # the rebuild's own output
 
-Every section corresponds to a citation in diagnosis.md.
+The rebuild emits the same JSONL schema (see DeliveryEventLog), so this script
+analyzes either log unmodified. Every section corresponds to a citation in
+diagnosis.md.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-LOG_PATH = Path(__file__).resolve().parent.parent / "webhook_delivery.log.jsonl"
+DEFAULT_LOG_PATH = Path(__file__).resolve().parent.parent / "webhook_delivery.log.jsonl"
 
 
 def parse_ts(ts: str) -> datetime:
@@ -29,10 +32,10 @@ def parse_ts(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
 
 
-def load_events():
+def load_events(log_path: Path):
     lines = []
     by_event: dict[str, list[dict]] = defaultdict(list)
-    with LOG_PATH.open("r", encoding="utf-8") as f:
+    with log_path.open("r", encoding="utf-8") as f:
         for raw in f:
             raw = raw.strip()
             if not raw:
@@ -259,10 +262,11 @@ def q10_slow_http(lines: list[dict]) -> None:
 
 
 def main() -> int:
-    if not LOG_PATH.exists():
-        print(f"error: log file not found at {LOG_PATH}", file=sys.stderr)
+    log_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_LOG_PATH
+    if not log_path.exists():
+        print(f"error: log file not found at {log_path}", file=sys.stderr)
         return 2
-    lines, by_event = load_events()
+    lines, by_event = load_events(log_path)
     q1_sanity(lines, by_event)
     q2_shapes(by_event)
     q3_abandonments(by_event)

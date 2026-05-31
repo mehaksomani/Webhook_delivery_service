@@ -21,6 +21,7 @@ import com.zenskar.billing.repository.DeliveryRepository;
 import com.zenskar.billing.repository.EndpointRepository;
 import com.zenskar.billing.config.BillingProperties;
 import com.zenskar.billing.http.HttpDeliveryResult;
+import com.zenskar.billing.observability.DeliveryEventLog;
 
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
@@ -36,10 +37,23 @@ public class DispatchService {
     private final RetryPolicy retryPolicy;
     private final ApplicationEventPublisher events;
     private final BillingProperties props;
+    private final DeliveryEventLog eventLog;
     private final Clock clock;
 
-    /** Hostname-ish identifier so a runbook can attribute leases to a process. */
-    private final String leaseHolderId = "node-" + System.getProperty("user.name", "anon");
+    /** Per-process identifier so a runbook can attribute a lease to a specific
+     *  worker. host+PID is unique across instances on the same box (the old
+     *  {@code user.name} form collided for co-located instances). */
+    private final String leaseHolderId = buildLeaseHolderId();
+
+    private static String buildLeaseHolderId() {
+        String host;
+        try {
+            host = java.net.InetAddress.getLocalHost().getHostName();
+        } catch (Exception e) {
+            host = "unknown-host";
+        }
+        return "node-" + host + "-" + ProcessHandle.current().pid();
+    }
 
     @Transactional
     public Optional<DispatchTask> startAttempt(String eventId) {
@@ -60,6 +74,7 @@ public class DispatchService {
         DeliveryAttempt attempt = delivery.startAttempt(now);
         deliveryRepository.save(delivery);
 
+        eventLog.dispatchStarted(eventId, delivery.getEndpointId(), attempt.getAttemptNo());
         log.debug("Started attempt event_id={} endpoint_id={} attempt={}",
                 eventId, delivery.getEndpointId(), attempt.getAttemptNo());
 
@@ -103,12 +118,19 @@ public class DispatchService {
 
         attempt.record(result.outcome(), result.statusCode(), result.latencyMs(), result.error(), now);
 
+        String endpointId = delivery.getEndpointId();
+        eventLog.httpRequestSent(eventId, endpointId, attemptNo, result.latencyMs());
+        if (result.statusCode() != null) {
+            eventLog.httpResponseReceived(eventId, endpointId, result.statusCode(), result.latencyMs());
+        }
+
         AttemptOutcome outcome = result.outcome();
         if (outcome == AttemptOutcome.SUCCESS) {
             delivery.succeed(now);
             deliveryRepository.save(delivery);
+            eventLog.deliverySucceeded(eventId, endpointId, delivery.getAttemptCount());
             log.info("Delivery succeeded event_id={} attempts={}", eventId, delivery.getAttemptCount());
-            events.publishEvent(new DeliverySucceededEvent(eventId, delivery.getEndpointId(),
+            events.publishEvent(new DeliverySucceededEvent(eventId, endpointId,
                     delivery.getAttemptCount(), now));
             return;
         }
@@ -118,11 +140,15 @@ public class DispatchService {
                 outcome, result.statusCode(), now));
 
         if (outcome == AttemptOutcome.PERMANENT_FAILURE) {
-            String reason = "permanent_failure (status=" + result.statusCode() + ")";
+            String detail = result.statusCode() != null
+                    ? "status=" + result.statusCode()
+                    : result.error();
+            String reason = "permanent_failure (" + detail + ")";
             delivery.deadLetter(reason, now);
             deliveryRepository.save(delivery);
+            eventLog.deliveryAbandoned(eventId, endpointId, attemptNo, reason, result.statusCode());
             log.warn("Dead-lettered (permanent) event_id={} reason={}", eventId, reason);
-            events.publishEvent(new DeliveryDeadLetteredEvent(eventId, delivery.getEndpointId(),
+            events.publishEvent(new DeliveryDeadLetteredEvent(eventId, endpointId,
                     delivery.getAttemptCount(), reason, now));
             return;
         }
@@ -132,8 +158,9 @@ public class DispatchService {
             String reason = "max_attempts_exceeded (" + retryPolicy.maxAttempts() + ")";
             delivery.deadLetter(reason, now);
             deliveryRepository.save(delivery);
+            eventLog.deliveryAbandoned(eventId, endpointId, attemptNo, reason, result.statusCode());
             log.warn("Dead-lettered (exhausted) event_id={} reason={}", eventId, reason);
-            events.publishEvent(new DeliveryDeadLetteredEvent(eventId, delivery.getEndpointId(),
+            events.publishEvent(new DeliveryDeadLetteredEvent(eventId, endpointId,
                     delivery.getAttemptCount(), reason, now));
             return;
         }
@@ -141,6 +168,7 @@ public class DispatchService {
         Instant next = now.plus(nextDelay.get());
         delivery.scheduleRetry(next);
         deliveryRepository.save(delivery);
+        eventLog.retryScheduled(eventId, endpointId, attemptNo, outcome.name(), result.statusCode());
         log.info("Scheduled retry event_id={} attempt={} next_attempt_at={} outcome={}",
                 eventId, attemptNo, next, outcome);
     }
