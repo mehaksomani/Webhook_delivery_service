@@ -14,13 +14,107 @@ Operational guide for on-call: [`runbook.md`](runbook.md).
 Requirements: JDK 17. The Gradle wrapper handles the rest.
 
 ```sh
-./gradlew test          # 16 tests across S1–S9 + RetryPolicy
+./gradlew test          # scenario + unit tests across S1–S9 + RetryPolicy
 ./gradlew bootRun       # http://localhost:8080 with H2 console at /h2-console
 ```
 
 H2 in-memory persistence; restart wipes state. To target Postgres swap
 `spring.datasource.url` in
 [`src/main/resources/application.properties`](src/main/resources/application.properties).
+
+## Testing the service
+
+Three complementary layers — automated tests, an end-to-end simulator, and
+manual `curl`.
+
+### 1. Automated tests (no external setup)
+
+```sh
+./gradlew test
+```
+
+`src/test/java/.../scenarios/` holds one test class per behavioral scenario
+S1–S9, plus `RetryPolicyTest`. Each scenario boots the full Spring context and
+points the dispatcher at an in-process **WireMock** server, so the real polling,
+leasing, retry, and recovery code paths run against canned HTTP responses. DB
+state is reset between tests. This is the authoritative pass/fail gate.
+
+### 2. End-to-end simulation (against a running service)
+
+[`tools/simulate.py`](tools/simulate.py) drives a **live** service through every
+scenario over its real HTTP API and asserts the observable outcome of each
+(status, attempt count, queue depth, endpoint health, dead-letter listing). It
+starts its own zero-dependency mock receiver (Python stdlib only — same spirit
+as `diagnose.py`) whose per-path behavior is driven by the
+`X-Billing-Delivery-Attempt` header.
+
+Start the service with the **`sim` profile** in one terminal — it permits a
+`127.0.0.1` receiver (the SSRF guard blocks private addresses by default) and
+compresses retry/lease timings so dead-lettering and crash recovery happen in
+seconds:
+
+```sh
+./gradlew bootRun --args='--spring.profiles.active=sim'
+```
+
+Then, from the repo root, in another terminal:
+
+```sh
+python3 tools/simulate.py
+```
+
+```text
+S1 — Happy path: a healthy endpoint delivers on the first attempt
+  [PASS] S1: status=SUCCEEDED attempts=1 (want SUCCEEDED/1)
+S2 — Retry with backoff: two transient 500s, then success on attempt 3
+  [PASS] S2: status=SUCCEEDED attempts=3 (want SUCCEEDED/3)
+...
+S6 — Crash recovery: a hung attempt past the lease is re-dispatched as the same event
+  [PASS] S6: status=SUCCEEDED attempts=2 outcomes=['CRASH', 'SUCCESS'] (want SUCCEEDED/2 incl CRASH)
+...
+Result: 10/10 checks passed
+```
+
+| Scenario | What the simulator drives | Asserted outcome |
+| --- | --- | --- |
+| S1 | event to a 200 endpoint | `SUCCEEDED`, 1 attempt |
+| S2 | endpoint 500s twice then 200 | `SUCCEEDED`, 3 attempts |
+| S3 | a 400 endpoint and an always-500 endpoint | `DEAD_LETTERED` (1 attempt / permanent, 4 attempts / exhausted) |
+| S4 | a backed-up slow endpoint + one fast event | fast event `SUCCEEDED` in < 5s |
+| S5 | same `event_id` submitted twice | one delivery, receiver hit once |
+| S6 | first attempt hangs past the lease | re-dispatched same event, attempts `[CRASH, SUCCESS]` |
+| S7 | a batch to a slow endpoint | `queue_depth > 0` |
+| S8 | repeated failures to one endpoint | endpoint `UNHEALTHY` |
+| S9 | dead-letters from S3 | listed by `?since=` |
+
+The simulator exits non-zero if any check fails. Override targets with the
+`BILLING_BASE_URL`, `RECEIVER_HOST`, and `RECEIVER_PORT` env vars.
+
+### 3. Manual smoke test with curl
+
+The `sim` profile (or any running instance reachable from your shell) also lets
+you poke the API directly. Note request bodies are **camelCase**; query
+responses are snake_case.
+
+```sh
+# Register an endpoint (any reachable receiver; httpbin used here as an example)
+curl -sX POST localhost:8080/api/v1/endpoints \
+  -H 'Content-Type: application/json' \
+  -d '{"endpointId":"ep-1","url":"https://httpbin.org/post"}'
+
+# Submit an event (returns 202; processed in the background)
+curl -sX POST localhost:8080/api/v1/events \
+  -H 'Content-Type: application/json' \
+  -d '{"eventId":"evt-1","eventType":"invoice.created","endpointId":"ep-1","payload":"{\"amount\":100}"}'
+
+# Inspect the delivery + its attempt history
+curl -s localhost:8080/api/v1/deliveries/evt-1
+
+# Other queries
+curl -s localhost:8080/api/v1/queues/ep-1/depth
+curl -s localhost:8080/api/v1/endpoints/ep-1/status
+curl -s "localhost:8080/api/v1/dead-letters?since=2020-01-01T00:00:00Z"
+```
 
 ## Reproducing the diagnosis
 
