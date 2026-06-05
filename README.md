@@ -90,6 +90,40 @@ Result: 10/10 checks passed
 The simulator exits non-zero if any check fails. Override targets with the
 `BILLING_BASE_URL`, `RECEIVER_HOST`, and `RECEIVER_PORT` env vars.
 
+#### Seeing the payload and how it's treated
+
+Run with `--verbose` (or `-v`) to print, for each scenario, the exact request
+payload and headers the receiver saw on **every attempt**, alongside how the
+service classified that attempt (status code → outcome → final state):
+
+```sh
+python3 tools/simulate.py --verbose
+```
+
+```text
+S2 — Retry with backoff: two transient 500s, then success on attempt 3
+  [PASS] S2: status=SUCCEEDED attempts=3 (want SUCCEEDED/3)
+      · evt-s2-de62518e
+          payload : {"amount": 100, "run": "de62518e"}
+          headers : X-Billing-Event-Id=evt-s2-de62518e  X-Billing-Event-Type=billing.invoice.created  (POST /flaky)
+          attempt 1: receiver GOT request | service: status=500 latency=2ms -> RETRIABLE_FAILURE (5xx/timeout/IO -> retry scheduled)
+          attempt 2: receiver GOT request | service: status=500 latency=2ms -> RETRIABLE_FAILURE (5xx/timeout/IO -> retry scheduled)
+          attempt 3: receiver GOT request | service: status=200 latency=2ms -> SUCCESS (2xx -> delivered)
+          final   : SUCCEEDED
+
+S6 — Crash recovery: a hung attempt past the lease is re-dispatched as the same event
+      · evt-s6-de62518e
+          attempt 1: receiver GOT request | service: status=None latency=0ms -> CRASH (no response before lease expiry -> re-dispatched)
+          attempt 2: receiver GOT request | service: status=200 latency=3ms -> SUCCESS (2xx -> delivered)
+          final   : SUCCEEDED
+```
+
+The left side (`payload`, `headers`, `receiver GOT request`) is what the mock
+receiver actually received; the right side (`status … -> OUTCOME`) is read back
+from the service's own attempt history, so you see both sides of each attempt.
+For a full lifecycle trace of every event the service emits the same data as
+JSONL — see [Structured delivery log](#structured-delivery-log) below.
+
 ### 3. Manual smoke test with curl
 
 The `sim` profile (or any running instance reachable from your shell) also lets

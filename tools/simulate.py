@@ -15,9 +15,15 @@ The sim profile allows a 127.0.0.1 receiver (the SSRF guard blocks private
 addresses by default) and compresses retry/lease timings so dead-lettering and
 crash recovery happen in seconds. Then, from the repo root:
 
-    python3 tools/simulate.py
+    python3 tools/simulate.py            # one PASS/FAIL line per scenario
+    python3 tools/simulate.py --verbose  # also show, per attempt, the exact payload
+                                         # + headers the receiver saw and how the
+                                         # service classified it
 
-Options (env vars):
+Options:
+    -v / --verbose     per-attempt payload + treatment trace (or set VERBOSE=1)
+
+Env vars:
     BILLING_BASE_URL   default http://localhost:8080
     RECEIVER_HOST      default 127.0.0.1
     RECEIVER_PORT      default 9099
@@ -27,6 +33,7 @@ Exit code is non-zero if any scenario fails.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -54,6 +61,10 @@ RECEIVER_BASE = f"http://{RECEIVER_HOST}:{RECEIVER_PORT}"
 # a silent no-op.
 RUN = uuid.uuid4().hex[:8]
 
+# Set by --verbose / -v (or VERBOSE=1). When on, each scenario prints the exact
+# payload + headers the receiver saw per attempt and how the service classified it.
+VERBOSE = os.environ.get("VERBOSE") == "1"
+
 
 # --------------------------------------------------------------------------- #
 # Mock webhook receiver
@@ -66,21 +77,30 @@ class Receiver:
     def __init__(self):
         self.lock = threading.Lock()
         self.hits_by_path = defaultdict(int)         # path -> request count
-        self.attempts_by_event = defaultdict(list)   # event_id -> [attempt_no, ...]
+        self.requests_by_event = defaultdict(list)   # event_id -> [request dict, ...]
 
-    def record(self, path: str, event_id: str, attempt: int):
+    def record(self, path: str, event_id: str, attempt: int, event_type: str, body: str):
         with self.lock:
             self.hits_by_path[path] += 1
             if event_id:
-                self.attempts_by_event[event_id].append(attempt)
+                self.requests_by_event[event_id].append({
+                    "path": path,
+                    "attempt": attempt,
+                    "event_type": event_type,
+                    "body": body,
+                })
 
     def path_hits(self, path: str) -> int:
         with self.lock:
             return self.hits_by_path[path]
 
+    def requests_for_event(self, event_id: str) -> list:
+        with self.lock:
+            return list(self.requests_by_event[event_id])
+
     def event_attempts(self, event_id: str) -> list:
         with self.lock:
-            return list(self.attempts_by_event[event_id])
+            return [r["attempt"] for r in self.requests_by_event[event_id]]
 
 
 RECEIVER = Receiver()
@@ -92,12 +112,12 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
-        if length:
-            self.rfile.read(length)  # drain body
+        body = self.rfile.read(length).decode("utf-8", "replace") if length else ""
         path = self.path.split("?", 1)[0]
         event_id = self.headers.get("X-Billing-Event-Id", "")
+        event_type = self.headers.get("X-Billing-Event-Type", "")
         attempt = int(self.headers.get("X-Billing-Delivery-Attempt", "1") or "1")
-        RECEIVER.record(path, event_id, attempt)
+        RECEIVER.record(path, event_id, attempt, event_type, body)
 
         status = self._decide(path, attempt)
         self.send_response(status)
@@ -221,6 +241,51 @@ def eid(name: str) -> str:
     return f"{name}-{RUN}"
 
 
+# Map the service's HTTP-status classification back to a one-line explanation.
+_OUTCOME_NOTE = {
+    "SUCCESS": "2xx -> delivered",
+    "RETRIABLE_FAILURE": "5xx/timeout/IO -> retry scheduled",
+    "PERMANENT_FAILURE": "4xx (or blocked target) -> dead-letter, no retry",
+    "CRASH": "no response before lease expiry -> re-dispatched (late reply ignored)",
+}
+
+
+def inspect(*event_ids):
+    """Print, for each event, the exact payload + headers the receiver saw on each
+    attempt alongside how the service classified that attempt. Only runs in -v mode."""
+    if not VERBOSE:
+        return
+    for event_id in event_ids:
+        reqs = RECEIVER.requests_for_event(event_id)
+        d = get_delivery(event_id) or {}
+        attempts = {a["attemptNo"]: a for a in d.get("attempts", [])}
+
+        print(f"      · {event_id}")
+        if reqs:
+            r0 = reqs[0]
+            print(f"          payload : {r0['body']}")
+            print(f"          headers : X-Billing-Event-Id={event_id}  "
+                  f"X-Billing-Event-Type={r0['event_type']}  (POST {r0['path']})")
+        else:
+            print("          payload : (receiver saw no request for this event)")
+
+        for n in range(1, max(len(attempts), len(reqs)) + 1):
+            got = any(r["attempt"] == n for r in reqs)
+            a = attempts.get(n)
+            recv = "receiver GOT request" if got else "receiver got NO request"
+            if a:
+                outcome = a.get("outcome")
+                note = _OUTCOME_NOTE.get(outcome, "")
+                svc = f"service: status={a.get('statusCode')} latency={a.get('latencyMs')}ms -> {outcome} ({note})"
+            else:
+                svc = "service: no attempt recorded"
+            print(f"          attempt {n}: {recv:24} | {svc}")
+
+        final = d.get("status", "?")
+        reason = d.get("deadLetterReason")
+        print(f"          final   : {final}" + (f"  reason={reason}" if reason else ""))
+
+
 # --------------------------------------------------------------------------- #
 # Scenarios
 # --------------------------------------------------------------------------- #
@@ -232,6 +297,7 @@ def s1_happy_path():
     d = poll(lambda: (get_delivery(e) or {}).get("status") == "SUCCEEDED" and get_delivery(e))
     ok = bool(d) and d["status"] == "SUCCEEDED" and d["attemptCount"] == 1
     report("S1", ok, f"status={d and d['status']} attempts={d and d['attemptCount']} (want SUCCEEDED/1)")
+    inspect(e)
 
 
 def s2_retry_backoff():
@@ -242,6 +308,7 @@ def s2_retry_backoff():
     d = poll(lambda: (get_delivery(e) or {}).get("status") == "SUCCEEDED" and get_delivery(e), timeout=20)
     ok = bool(d) and d["status"] == "SUCCEEDED" and d["attemptCount"] == 3
     report("S2", ok, f"status={d and d['status']} attempts={d and d['attemptCount']} (want SUCCEEDED/3)")
+    inspect(e)
 
 
 def s3_permanent_dead_letter():
@@ -261,6 +328,7 @@ def s3_permanent_dead_letter():
     ok_down = bool(dd) and dd["attemptCount"] == 4 and "max_attempts_exceeded" in (dd["deadLetterReason"] or "")
     report("S3b (exhausted)", ok_down,
            f"attempts={dd and dd['attemptCount']} reason={dd and dd['deadLetterReason']} (want 4 / max_attempts_exceeded)")
+    inspect(perm, down)
 
 
 def s4_endpoint_isolation():
@@ -277,6 +345,7 @@ def s4_endpoint_isolation():
     elapsed = time.time() - t0
     ok = bool(d) and d["status"] == "SUCCEEDED" and elapsed < 5
     report("S4", ok, f"fast event SUCCEEDED in {elapsed:.1f}s while slow endpoint backed up (want < 5s)")
+    inspect(fast)
 
 
 def s5_idempotent_resubmit():
@@ -291,6 +360,7 @@ def s5_idempotent_resubmit():
     receiver_hits = RECEIVER.event_attempts(e)
     ok = bool(d) and d["attemptCount"] == 1 and len(receiver_hits) == 1
     report("S5", ok, f"attempts={d and d['attemptCount']} receiver_deliveries={len(receiver_hits)} (want 1 / 1)")
+    inspect(e)
 
 
 def s6_crash_recovery():
@@ -304,6 +374,7 @@ def s6_crash_recovery():
     outcomes = [a["outcome"] for a in (d["attempts"] if d else [])]
     ok = bool(d) and d["status"] == "SUCCEEDED" and d["attemptCount"] == 2 and "CRASH" in outcomes
     report("S6", ok, f"status={d and d['status']} attempts={d and d['attemptCount']} outcomes={outcomes} (want SUCCEEDED/2 incl CRASH)")
+    inspect(e)
 
 
 def s7_queue_depth():
@@ -315,6 +386,7 @@ def s7_queue_depth():
     d = queue_depth("ep-depth")
     ok = bool(depth) and d > 0
     report("S7", ok, f"queue_depth={d} while the slow endpoint drains (want > 0)")
+    inspect(eid("evt-s7-0"))
 
 
 def s8_endpoint_health():
@@ -325,6 +397,7 @@ def s8_endpoint_health():
     status = poll(lambda: endpoint_status("ep-health") == "UNHEALTHY" and "UNHEALTHY", timeout=20)
     ok = status == "UNHEALTHY"
     report("S8", ok, f"endpoint health={endpoint_status('ep-health')} after repeated failures (want UNHEALTHY)")
+    inspect(eid("evt-s8-0"))
 
 
 def s9_dead_letter_listing(since_iso: str):
@@ -334,6 +407,10 @@ def s9_dead_letter_listing(since_iso: str):
     expected = {eid("evt-s3-perm"), eid("evt-s3-down")}
     ok = expected.issubset(ids)
     report("S9", ok, f"{len(dls)} dead-letters listed since start; contains S3 events = {expected.issubset(ids)}")
+    if VERBOSE:
+        for d in dls:
+            print(f"      · {d['eventId']:24} status={d['status']} "
+                  f"attempts={d['attemptCount']} reason={d.get('deadLetterReason')}")
 
 
 # --------------------------------------------------------------------------- #
@@ -358,9 +435,17 @@ def wait_for_service() -> bool:
 
 
 def main():
+    global VERBOSE
+    parser = argparse.ArgumentParser(description="End-to-end scenario simulator for the webhook delivery service.")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="show the payload + headers the receiver saw per attempt and how the service classified it")
+    args = parser.parse_args()
+    VERBOSE = VERBOSE or args.verbose
+
     print(f"Billing service : {BASE_URL}")
     print(f"Mock receiver   : {RECEIVER_BASE}")
-    print(f"Run token       : {RUN}\n")
+    print(f"Run token       : {RUN}")
+    print(f"Verbose         : {VERBOSE}\n")
 
     if not wait_for_service():
         print(f"ERROR: billing service not reachable at {BASE_URL}.")
